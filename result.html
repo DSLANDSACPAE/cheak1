@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block header %}{{ city }} 조경 관련조문{% endblock %}
+
+{% block content %}
+<div class="notice good">적용 우선순위: ① 자치법규(조례) &gt; ② 행정규칙(국토부 고시) &gt; ③ 법률·시행령</div>
+
+{% if not articles %}
+  <p class="muted">조경/필로티 관련 조문을 찾지 못했습니다.</p>
+{% else %}
+  {% for title, content, has_piloti in articles %}
+    <div class="card">
+      <div class="article-title">■ {{ title }}</div>
+      <p class="muted">(근거: {{ city }} 건축조례) — 우선순위 ①</p>
+      <div class="article-text">{{ content }}</div>
+      {% if has_piloti %}
+        <p class="notice" style="margin-top:8px;">&gt;&gt;&gt; 필로티 관련 규정 포함 &lt;&lt;&lt;</p>
+      {% endif %}
+    </div>
+  {% endfor %}
+{% endif %}
+
+<div class="card">
+  <div class="article-title">■ 참고: 국토부 고시 「조경기준」 (면적 관련 조항)</div>
+  <p class="muted">(근거: 국토교통부 고시) — 우선순위 ②</p>
+
+  <h3>제4조 (식재의무면적)</h3>
+  {% if err4 %}
+    <p class="notice">[조회 실패] {{ err4 }}</p>
+  {% else %}
+    {% if ordinance_has_planting %}
+      <p class="notice">⚠ 조례에도 '식재의무면적' 관련 문구가 있습니다 - 조례가 우선 적용되며, 아래는 참고용입니다.</p>
+    {% else %}
+      <p class="notice good">조례에 별도 규정이 없어 이 고시 기준(식재면적 50% 이상)이 그대로 적용됩니다.</p>
+    {% endif %}
+    <div class="article-text">{{ article4_text }}</div>
+  {% endif %}
+
+  <h3>제5조 (조경면적의 배치)</h3>
+  {% if err5 %}
+    <p class="notice">[조회 실패] {{ err5 }}</p>
+  {% else %}
+    {% if ordinance_has_natural %}
+      <p class="notice">⚠ 조례에도 '자연지반' 관련 문구가 있습니다 - 조례가 우선 적용되며, 아래는 참고용입니다.</p>
+    {% else %}
+      <p class="notice good">조례에 별도 규정이 없어 이 고시 기준(자연지반 10% 이상)이 그대로 적용됩니다.</p>
+    {% endif %}
+    <div class="article-text">{{ article5_text }}</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <div class="article-title">■ 참고: 건축법 시행령 제27조③ (옥상조경 인정비율·상한)</div>
+  <p class="muted">(근거: 건축법 시행령) — 우선순위 ③</p>
+  {% if err27 %}
+    <p class="notice">[조회 실패] {{ err27 }}</p>
+  {% else %}
+    {% if roof_override and roof_override.cap_pct is not none %}
+      <p class="notice">⚠ 조례에도 '옥상조경' 관련 수치가 있습니다 - 조례가 우선 적용되며, 아래는 참고용입니다.</p>
+    {% elif roof_override and roof_override.found_mention %}
+      <p class="notice">⚠ 조례에 '옥상조경' 언급은 있으나 정확한 수치를 확인 못했습니다 - 원문 확인 필요.</p>
+    {% else %}
+      <p class="notice good">조례에 별도 규정이 없어 이 시행령 기준(옥상조경 2/3 인정, 50% 초과불가)이 그대로 적용됩니다.</p>
+    {% endif %}
+    <div class="article-text">{{ hang3 or "제27조③ 항을 찾지 못했습니다." }}</div>
+  {% endif %}
+</div>
+{% endblock %}

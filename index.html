@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block header %}지자체 검색{% endblock %}
+
+{% block content %}
+<div class="card">
+  <form action="{{ url_for('search') }}" method="get">
+    <label class="field-label" for="city">대상 지자체</label>
+    <input type="text" id="city" name="city" value="{{ city }}" placeholder="예: 수원시" required>
+    <button type="submit" class="btn btn-primary" style="margin-top:12px;">검색</button>
+  </form>
+</div>
+
+{% if error %}
+  <div class="notice">{{ error }}</div>
+{% endif %}
+
+{% if results is not none %}
+  <div class="card">
+    {% if total is not none %}
+      <p class="muted">'{{ city }}' 전체 자치법규 {{ total }}개 중 '건축 조례' 관련 {{ results|length }}개 검색됨</p>
+    {% endif %}
+
+    {% if results %}
+      <h2>검색결과 (정확히 일치하는 것이 맨 위)</h2>
+      {% for name, mst in results %}
+        <a class="result-item" href="{{ url_for('calculator', city=city, mst=mst) }}">
+          <div class="name">{{ name }}</div>
+          <div class="mst">MST={{ mst }}</div>
+        </a>
+      {% endfor %}
+    {% else %}
+      <p class="muted">검색 결과가 없습니다.</p>
+    {% endif %}
+  </div>
+{% endif %}
+{% endblock %}

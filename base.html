@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>{% block title %}대지안의 조경기준 조회{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <span class="topbar-title">{% block header %}대지안의 조경기준 조회{% endblock %}</span>
+  </header>
+
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+
+  <nav class="bottomnav">
+    <a href="{{ url_for('search', city=request.args.get('city','')) }}" class="navitem {{ 'active' if request.endpoint == 'search' else '' }}">
+      <span class="navnum">①</span><span>검색</span>
+    </a>
+    <a href="{{ url_for('calculator', city=request.args.get('city',''), mst=request.args.get('mst','')) }}"
+       class="navitem {{ 'active' if request.endpoint == 'calculator' else '' }}">
+      <span class="navnum">②</span><span>계산기</span>
+    </a>
+    <a href="{{ url_for('result', city=request.args.get('city',''), mst=request.args.get('mst','')) }}"
+       class="navitem {{ 'active' if request.endpoint == 'result' else '' }}">
+      <span class="navnum">③</span><span>조회결과</span>
+    </a>
+    <a href="{{ url_for('favorites') }}" class="navitem {{ 'active' if request.endpoint == 'favorites' else '' }}">
+      <span class="navnum">④</span><span>즐겨찾기</span>
+    </a>
+  </nav>
+</body>
+</html>

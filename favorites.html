@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block header %}즐겨찾기{% endblock %}
+
+{% block content %}
+<div class="card">
+  {% if favorites %}
+    {% for city in favorites %}
+      <a class="result-item" href="{{ url_for('search', city=city) }}" style="display:flex; justify-content:space-between; align-items:center;">
+        <span class="name">{{ city }}</span>
+      </a>
+      <form method="post" action="{{ url_for('favorites_remove') }}" style="margin: -4px 0 8px;">
+        <input type="hidden" name="city" value="{{ city }}">
+        <button type="submit" class="btn btn-small btn-secondary">삭제</button>
+      </form>
+    {% endfor %}
+  {% else %}
+    <p class="muted">저장된 즐겨찾기가 없습니다. 계산기 화면에서 "즐겨찾기에 추가"를 눌러보세요.</p>
+  {% endif %}
+</div>
+{% endblock %}

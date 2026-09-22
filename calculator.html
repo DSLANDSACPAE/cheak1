@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block header %}조경면적 계산기{% endblock %}
+
+{% block content %}
+{% if error %}
+  <div class="notice">{{ error }}</div>
+{% endif %}
+
+<div class="card">
+  <span class="badge">{{ city }}</span>
+  <a href="{{ url_for('result', city=city, mst=mst) }}" class="muted" style="float:right;">원문 조문 보기 →</a>
+</div>
+
+<form method="post" action="{{ url_for('calculator', city=city, mst=mst) }}">
+  <div class="card">
+    <label class="field-label" for="site_area">대지면적(㎡)</label>
+    <input type="text" id="site_area" name="site_area" value="{{ form.site_area }}" inputmode="decimal">
+  </div>
+
+  <div class="card">
+    <h2>연면적 구간 선택 (조문에서 자동추출)</h2>
+    {% if tiers %}
+      {% for cond, pct in tiers %}
+        <label class="choice {{ 'selected' if form.tier_pct|string == pct|string else '' }}">
+          <input type="radio" name="tier_pct" value="{{ pct }}" {{ 'checked' if form.tier_pct|string == pct|string else '' }}>
+          {{ cond }} → {{ "%.1f"|format(pct) }}%
+        </label>
+      {% endfor %}
+    {% else %}
+      <p class="notice">자동추출 실패 - 원문 조문을 확인 후 필요시 직접 계산해주세요.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>해당되는 경우 선택 (비율 한정 항목만)</h2>
+    <label class="choice {{ 'selected' if form.exempt_mult == '1.0' else '' }}">
+      <input type="radio" name="exempt_mult" value="1.0" {{ 'checked' if form.exempt_mult == '1.0' else '' }}>
+      해당 없음 (기본 비율 그대로 적용)
+    </label>
+    {% for desc, frac in exempt_items %}
+      <label class="choice {{ 'selected' if form.exempt_mult|string == frac|string else '' }}">
+        <input type="radio" name="exempt_mult" value="{{ frac }}" {{ 'checked' if form.exempt_mult|string == frac|string else '' }}>
+        {{ desc }} → 기준의 {{ "%.2f"|format(frac) }}배로 한정 적용
+      </label>
+    {% endfor %}
+    {% if not exempt_items %}
+      <p class="muted">비율 한정 예외 항목을 찾지 못했습니다 (완전면제 항목만 있거나 문구가 다를 수 있음).</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>적용비율·최대산입비율</h2>
+    <p class="muted">
+      적용비율(인정비율): 설치면적 중 조경면적으로 인정되는 비율<br>
+      최대산입비율(상한): 인정된 면적도 넘지 못하는 ①(법정조경면적) 대비 상한
+    </p>
+
+    <hr class="sep">
+    <label class="field-label">옥상조경 적용비율(인정비율)</label>
+    <p class="badge">{{ defaults.roof_ratio_frac }}</p>
+
+    <label class="field-label" for="roof_input">옥상조경 최대산입비율(상한)</label>
+    <input type="text" id="roof_input" name="roof_input" value="{{ form.roof_input }}">
+    <p class="muted">근거: {{ defaults.roof_source }}</p>
+
+    <hr class="sep">
+    <label class="field-label">필로티 적용비율(인정비율)</label>
+    <p class="badge">{{ defaults.piloti_ratio_frac }}</p>
+
+    <label class="field-label" for="piloti_input">필로티 최대산입비율(상한)</label>
+    <input type="text" id="piloti_input" name="piloti_input" value="{{ form.piloti_input }}">
+    <p class="muted">근거: {{ defaults.piloti_source }}</p>
+  </div>
+
+  <button type="submit" class="btn btn-primary">계산하기</button>
+</form>
+
+{% if result_rows %}
+  <div class="card" style="margin-top:14px;">
+    <h2>계산결과</h2>
+    <table class="result-table">
+      {% for row in result_rows %}
+        <tr>
+          <td class="label">{{ row.label }}</td>
+          <td class="value">{{ row.value }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+    <p class="muted" style="margin-top:10px;">
+      ※ 옥상조경·필로티는 각각 ①(법정조경면적)에 대한 '최대가능면적'이며, 실제 설치 여부와 무관하게 상한을 보여줍니다.
+      최종 판단은 조문 원문과 담당 공무원 확인이 필요합니다.
+    </p>
+  </div>
+{% endif %}
+
+<form method="post" action="{{ url_for('favorites_add') }}">
+  <input type="hidden" name="city" value="{{ city }}">
+  <button type="submit" class="btn btn-secondary" style="margin-top:8px;">이 지자체 즐겨찾기에 추가</button>
+</form>
+{% endblock %}

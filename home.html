@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>대지안의 조경기준 검토</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="home-body">
+  <div class="home-wrap">
+
+    <div class="home-title">
+      <h1>대지안의<br>조경기준 검토</h1>
+    </div>
+
+    <div class="home-search card">
+      <form action="{{ url_for('search') }}" method="get">
+        <label class="field-label" for="city">대상 지자체</label>
+        <input type="text" id="city" name="city" placeholder="예: 수원시" required autofocus>
+        <button type="submit" class="btn btn-primary" style="margin-top:12px;">검토 시작</button>
+      </form>
+    </div>
+
+    <footer class="home-footer">
+      {% if logo_available %}
+        <img src="{{ url_for('static', filename='logo.png') }}" alt="디에스조경설계" class="home-logo">
+      {% else %}
+        <div class="home-company">
+          <div class="home-company-kr">디에스조경설계</div>
+          <div class="home-company-en">DONGSAN LANDSCAPE ASSOCIATES</div>
+        </div>
+      {% endif %}
+    </footer>
+
+  </div>
+</body>
+</html>
