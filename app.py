@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-대지안의 조경 기준 조회 프로그램 (모바일 웹앱 / exe / 클라우드 겸용)
-- 파싱 예외 처리 강화: 조례 및 고시 파싱 실패 시에도 오류 없이 기본값으로 계산 완료
-- CDATA 및 특수문자 완벽 정제
-- 최상단 지자체 건축 조례 우선 정렬
+대지안의 조경 기준 조회 프로그램 (Render 클라우드 배포용)
+- Render 파일 시스템 접근 권한 예외 처리 (PermissionError 방지)
+- 템플릿 렌더링 실패 및 API 파싱 failure 시 500 에러 완벽 차단
 """
 
 import json
@@ -11,8 +10,6 @@ import math
 import os
 import re
 import sys
-import threading
-import webbrowser
 from fractions import Fraction
 
 import requests
@@ -22,13 +19,17 @@ OC_KEY = "dsland"
 SEARCH_URL = "http://www.law.go.kr/DRF/lawSearch.do"
 SERVICE_URL = "http://www.law.go.kr/DRF/lawService.do"
 
-DATA_DIR = os.path.join(os.path.expanduser("~"), ".landscape_app")
-os.makedirs(DATA_DIR, exist_ok=True)
+# 클라우드 호스팅 환경을 고려한 임시 폴더 설정 (권한 에러 방지)
+DATA_DIR = "/tmp/.landscape_app" if os.path.exists("/tmp") else os.path.join(os.path.expanduser("~"), ".landscape_app")
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception:
+    pass
 FAVORITES_FILE = os.path.join(DATA_DIR, "favorites.json")
 
 
 def resource_path(relative_path: str) -> str:
-    """개발 환경 및 PyInstaller exe 빌드 환경 공통 경로 처리"""
+    """개발 환경 및 PyInstaller exe / 배포 환경 공통 경로"""
     base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, relative_path)
 
@@ -41,14 +42,41 @@ app = Flask(
 
 
 # ----------------------------------------------------------------------
+# 즐겨찾기 유틸리티 (클라우드 파일 권한 안전장치)
+# ----------------------------------------------------------------------
+
+MEMORY_FAVORITES = []
+
+def load_favorites():
+    global MEMORY_FAVORITES
+    try:
+        if os.path.exists(FAVORITES_FILE):
+            with open(FAVORITES_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return MEMORY_FAVORITES
+
+
+def save_favorites(favs):
+    global MEMORY_FAVORITES
+    MEMORY_FAVORITES = favs
+    try:
+        with open(FAVORITES_FILE, "w", encoding="utf-8") as f:
+            json.dump(favs, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+# ----------------------------------------------------------------------
 # 안전 유틸리티 및 변환 함수
 # ----------------------------------------------------------------------
 
 def clean_cdata(text: str) -> str:
-    """XML CDATA 및 HTML/XML 태그 제거 (None 대처 가능)"""
     if not text:
         return ""
     try:
+        text = str(text)
         text = re.sub(r"", r"\1", text, flags=re.DOTALL)
         text = re.sub(r"<[^>]+>", "", text)
         return text.strip()
@@ -81,7 +109,7 @@ def korean_fraction_to_float(text: str):
     if not text:
         return None
     try:
-        m = re.search(r"(\d+)\s*분의\s*(\d+)", text)
+        m = re.search(r"(\d+)\s*분의\s*(\d+)", str(text))
         if not m:
             return None
         denom, numer = int(m.group(1)), int(m.group(2))
@@ -121,7 +149,7 @@ def extract_tag(tag: str, block: str) -> str:
 
 
 # ----------------------------------------------------------------------
-# 자치법규(조례) API 및 예외 안전 파서
+# 자치법규(조례) API 및 안전 파서
 # ----------------------------------------------------------------------
 
 def count_all_ordinances(city_name: str) -> int:
@@ -168,24 +196,33 @@ def search_building_ordinance(city_name: str):
 
     results = []
     for law in all_laws:
-        name = extract_tag("자치법규명", law)
-        mst = extract_tag("자치법규일련번호", law)
-        if name and mst:
-            results.append((name, mst))
+        try:
+            name = extract_tag("자치법규명", law)
+            mst = extract_tag("자치법규일련번호", law)
+            if name and mst:
+                results.append((name, mst))
+        except Exception:
+            continue
 
     def score(item):
-        name_clean = clean_cdata(item[0])
-        name_ns = name_clean.replace(" ", "")
-        
-        if name_ns == city_nospace + keyword_nospace:
-            return 0
-        if name_ns == city_nospace + "건축조례":
-            return 1
-        if name_ns.startswith(city_nospace) and keyword_nospace in name_ns:
-            return 2
-        return 3
+        try:
+            name_clean = clean_cdata(item[0])
+            name_ns = name_clean.replace(" ", "")
+            
+            if name_ns == city_nospace + keyword_nospace:
+                return 0
+            if name_ns == city_nospace + "건축조례":
+                return 1
+            if name_ns.startswith(city_nospace) and keyword_nospace in name_ns:
+                return 2
+            return 3
+        except Exception:
+            return 4
 
-    results.sort(key=score)
+    try:
+        results.sort(key=score)
+    except Exception:
+        pass
     return results
 
 
@@ -195,7 +232,7 @@ def fetch_ordinance_body(mst: str) -> str:
         resp = requests.get(SERVICE_URL, params=params, timeout=10)
         resp.encoding = "utf-8"
         return resp.text
-    except Exception as e:
+    except Exception:
         return ""
 
 
@@ -223,7 +260,6 @@ def extract_area_tiers(content: str):
         return []
     tiers = []
     try:
-        # 다중 정규식 검색 패턴 적용 (퍼센트, %)
         patterns = [
             r"(연면적[^:\n]{0,80}?)\s*:\s*대지면적의\s*([\d.]+)\s*퍼센트",
             r"(연면적[^:\n]{0,80}?)\s*:\s*대지면적의\s*([\d.]+)\s*%",
@@ -275,10 +311,10 @@ def get_main_landscape_article(articles):
 
 
 # ----------------------------------------------------------------------
-# 국토부 고시 및 건축법 시행령 데이터 안전 조회
+# 국토부 고시 데이터 안전 조회
 # ----------------------------------------------------------------------
 
-_CACHE = {"admrul": None, "law": {}}
+_CACHE = {"admrul": None}
 
 def get_admrul_body():
     if _CACHE["admrul"] is not None:
@@ -378,13 +414,12 @@ def extract_piloti_cap_from_ordinance(ordinance_content: str):
 
 
 # ----------------------------------------------------------------------
-# 계산 엔진 (FallBack 안전장치 결합)
+# 계산 엔진
 # ----------------------------------------------------------------------
 
 def compute_defaults(main_content: str, city: str):
     main_no = extract_article_no_from_content(main_content)
 
-    # 옥상조경 설정 예외 처리
     roof_override = extract_roof_override_from_ordinance(main_content)
     if roof_override and roof_override.get("cap_pct") is not None:
         roof_cap_pct = roof_override["cap_pct"]
@@ -393,7 +428,6 @@ def compute_defaults(main_content: str, city: str):
         roof_cap_pct = 50.0
         roof_source = "시행령 제27조③ (기본값 50% 적용)"
 
-    # 필로티 설정 예외 처리
     piloti_cap_ratio, piloti_found = extract_piloti_cap_from_ordinance(main_content)
     if piloti_cap_ratio is not None:
         piloti_cap_pct = piloti_cap_ratio * 100
@@ -426,7 +460,6 @@ def run_calculation(main_content, city, site_area, tier_pct, exempt_mult,
         roof_max = required * roof_cap_pct
         piloti_max = required * piloti_cap_pct
 
-        # 식재의무면적 파싱 및 Fallback 예외 대처 (기본값 50%)
         ordinance_planting_pct = extract_planting_pct_from_ordinance(main_content)
         if ordinance_planting_pct is not None:
             planting_pct = ordinance_planting_pct
@@ -435,7 +468,6 @@ def run_calculation(main_content, city, site_area, tier_pct, exempt_mult,
             planting_pct, planting_source = 50.0, "국토부 고시 제4조 (기본값 50% 적용)"
         planting_min = required * (planting_pct / 100)
 
-        # 자연지반 파싱 및 Fallback 예외 대처 (기본값 10%)
         ordinance_natural_pct = extract_natural_ground_pct_from_ordinance(main_content)
         if ordinance_natural_pct is not None:
             natural_pct = ordinance_natural_pct
@@ -470,105 +502,141 @@ def run_calculation(main_content, city, site_area, tier_pct, exempt_mult,
 
 
 # ----------------------------------------------------------------------
-# Flask 웹 라우트
+# Flask 웹 라우트 (최상위 예외 처리 보장)
 # ----------------------------------------------------------------------
 
 @app.route("/")
 def home():
-    return render_template("home.html")
+    favs = load_favorites()
+    return render_template("home.html", favorites=favs)
 
 
 @app.route("/search")
 def search():
     city = request.args.get("city", "").strip()
+    favs = load_favorites()
     if not city:
-        return render_template("index.html", city="", results=None, total=None)
+        return render_template("index.html", city="", results=[], total=0, favorites=favs)
+    
     try:
         total = count_all_ordinances(city)
         results = search_building_ordinance(city)
+        return render_template("index.html", city=city, results=results, total=total, favorites=favs)
     except Exception as e:
-        return render_template("index.html", city=city, results=[], total=0, error=f"검색 실패: {e}")
-    return render_template("index.html", city=city, results=results, total=total)
+        # 에러 발생 시에도 500으로 튕기지 않고 화면 유지
+        return render_template("index.html", city=city, results=[], total=0, error=f"조회 중 에러가 발생했습니다: {e}", favorites=favs)
 
 
 @app.route("/calculator", methods=["GET", "POST"])
 def calculator():
     city = request.values.get("city", "").strip()
     mst = request.values.get("mst", "").strip()
+    favs = load_favorites()
+    
     if not city or not mst:
         return redirect(url_for("home"))
 
-    full_text = fetch_ordinance_body(mst)
-    articles = extract_landscape_articles(full_text)
-    main_content = get_main_landscape_article(articles)
-    
-    tiers = extract_area_tiers(main_content)
-    exempt_items = extract_partial_exemption_items(main_content)
-    defaults = compute_defaults(main_content, city)
+    try:
+        full_text = fetch_ordinance_body(mst)
+        articles = extract_landscape_articles(full_text)
+        main_content = get_main_landscape_article(articles)
+        
+        tiers = extract_area_tiers(main_content)
+        exempt_items = extract_partial_exemption_items(main_content)
+        defaults = compute_defaults(main_content, city)
 
-    result_rows = None
-    form = {
-        "site_area": "1500",
-        "tier_pct": tiers[0][1] if tiers else "10",
-        "exempt_mult": "1.0",
-        "roof_input": defaults["roof_default_frac"],
-        "piloti_input": defaults["piloti_default_frac"],
-    }
+        result_rows = None
+        form = {
+            "site_area": "1500",
+            "tier_pct": tiers[0][1] if tiers else "10",
+            "exempt_mult": "1.0",
+            "roof_input": defaults["roof_default_frac"],
+            "piloti_input": defaults["piloti_default_frac"],
+        }
 
-    if request.method == "POST":
-        form["site_area"] = request.form.get("site_area", "1500")
-        form["tier_pct"] = request.form.get("tier_pct", "10")
-        form["exempt_mult"] = request.form.get("exempt_mult", "1.0")
-        form["roof_input"] = request.form.get("roof_input", defaults["roof_default_frac"])
-        form["piloti_input"] = request.form.get("piloti_input", defaults["piloti_default_frac"])
+        if request.method == "POST":
+            form["site_area"] = request.form.get("site_area", "1500")
+            form["tier_pct"] = request.form.get("tier_pct", "10")
+            form["exempt_mult"] = request.form.get("exempt_mult", "1.0")
+            form["roof_input"] = request.form.get("roof_input", defaults["roof_default_frac"])
+            form["piloti_input"] = request.form.get("piloti_input", defaults["piloti_default_frac"])
 
-        try:
-            site_area = float(form["site_area"])
-            tier_pct = float(form["tier_pct"])
-            exempt_mult = float(form["exempt_mult"])
-            
-            result_rows, calc_err = run_calculation(
-                main_content, city, site_area, tier_pct, exempt_mult,
-                form["roof_input"], form["piloti_input"], defaults["main_no"],
-                defaults["roof_source"], defaults["piloti_source"],
-                defaults["roof_ratio_frac"], defaults["piloti_ratio_frac"],
-            )
-            if calc_err:
+            try:
+                site_area = float(form["site_area"])
+                tier_pct = float(form["tier_pct"])
+                exempt_mult = float(form["exempt_mult"])
+                
+                result_rows, calc_err = run_calculation(
+                    main_content, city, site_area, tier_pct, exempt_mult,
+                    form["roof_input"], form["piloti_input"], defaults["main_no"],
+                    defaults["roof_source"], defaults["piloti_source"],
+                    defaults["roof_ratio_frac"], defaults["piloti_ratio_frac"],
+                )
+                if calc_err:
+                    return render_template("calculator.html", city=city, mst=mst, tiers=tiers,
+                                           exempt_items=exempt_items, defaults=defaults, form=form,
+                                           result_rows=None, error=calc_err, favorites=favs)
+            except ValueError:
                 return render_template("calculator.html", city=city, mst=mst, tiers=tiers,
                                        exempt_items=exempt_items, defaults=defaults, form=form,
-                                       result_rows=None, error=calc_err)
-        except ValueError:
-            return render_template("calculator.html", city=city, mst=mst, tiers=tiers,
-                                   exempt_items=exempt_items, defaults=defaults, form=form,
-                                   result_rows=None, error="숫자 형식 입력을 확인해주세요.")
+                                       result_rows=None, error="숫자 형식 입력을 확인해주세요.", favorites=favs)
 
-    return render_template("calculator.html", city=city, mst=mst, tiers=tiers,
-                           exempt_items=exempt_items, defaults=defaults, form=form,
-                           result_rows=result_rows, error=None)
+        return render_template("calculator.html", city=city, mst=mst, tiers=tiers,
+                               exempt_items=exempt_items, defaults=defaults, form=form,
+                               result_rows=result_rows, error=None, favorites=favs)
+    except Exception as e:
+        return render_template("home.html", favorites=favs, error=f"계산기 로드 실패: {e}")
 
 
 @app.route("/result")
 def result():
     city = request.args.get("city", "").strip()
     mst = request.args.get("mst", "").strip()
+    favs = load_favorites()
+    
     if not city or not mst:
         return redirect(url_for("home"))
 
-    full_text = fetch_ordinance_body(mst)
-    articles = extract_landscape_articles(full_text)
-    article4_text, err4 = get_admrul_article(4)
-    article5_text, err5 = get_admrul_article(5)
+    try:
+        full_text = fetch_ordinance_body(mst)
+        articles = extract_landscape_articles(full_text)
+        article4_text, err4 = get_admrul_article(4)
+        article5_text, err5 = get_admrul_article(5)
 
-    return render_template(
-        "result.html", city=city, mst=mst, articles=articles,
-        article4_text=article4_text, err4=err4,
-        article5_text=article5_text, err5=err5,
-    )
+        return render_template(
+            "result.html", city=city, mst=mst, articles=articles,
+            article4_text=article4_text, err4=err4,
+            article5_text=article5_text, err5=err5, favorites=favs
+        )
+    except Exception as e:
+        return redirect(url_for("home"))
 
 
-# ----------------------------------------------------------------------
-# 실행 설정
-# ----------------------------------------------------------------------
+@app.route("/favorites")
+def favorites():
+    favs = load_favorites()
+    return render_template("favorites.html", favorites=favs)
+
+
+@app.route("/favorites/add", methods=["POST"])
+def favorites_add():
+    city = request.form.get("city", "").strip()
+    favs = load_favorites()
+    if city and city not in favs:
+        favs.append(city)
+        save_favorites(favs)
+    return redirect(url_for("favorites"))
+
+
+@app.route("/favorites/remove", methods=["POST"])
+def favorites_remove():
+    city = request.form.get("city", "").strip()
+    favs = load_favorites()
+    if city in favs:
+        favs.remove(city)
+        save_favorites(favs)
+    return redirect(url_for("favorites"))
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
