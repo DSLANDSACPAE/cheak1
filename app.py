@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # 대지안의 조경 기준 조회 프로그램 (모바일 웹앱 버전 / exe 실행파일 겸용 / 클라우드 배포 겸용)
 
+import html
 import json
 import math
 import os
@@ -51,9 +52,11 @@ def safe_api_get(url: str, params: dict) -> str:
 def clean_cdata_and_tags(text: str) -> str:
     if not text:
         return ""
+    # CDATA 태그 및 HTML 태그 제거
     text = re.sub(r"", r"\1", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
-    text = text.replace("<", "<").replace(">", ">").replace("&", "&").replace(""", '\"')
+    # html.unescape를 사용하여 <, >, &, " 등의 엔티티를 안전하게 변환
+    text = html.unescape(text)
     return text.strip()
 
 
