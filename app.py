@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-대지안의 조경 기준 조회 프로그램 (모바일 웹앱 버전 / exe 실행파일 겸용 / GitServer 배포 겸용)
-- 국가법령정보센터 DRF API 자치법규 검색 및 XML 파싱 완벽 견고화 버전
-필요 라이브러리: pip install flask requests gunicorn
+대지안의 조경 기준 조회 프로그램 (모바일 웹앱 버전 / exe 실행파일 겸용 / 클라우드 배포 겸용)
+- 데스크톱 app.py와 동일한 로직(API 호출, 정규식 추출)을 그대로 재사용
+- CDATA 태그 완벽 제거 및 국가법령정보센터 자치법규 API 연동 보완 완료
 """
 
 import json
@@ -43,8 +43,40 @@ app = Flask(
 
 
 # ----------------------------------------------------------------------
-# 공통 유틸
+# 공통 유틸 및 XML 파싱 보완
 # ----------------------------------------------------------------------
+
+def safe_api_get(url: str, params: dict) -> str:
+    """안전한 API 호출 및 인코딩 처리"""
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.encoding = "utf-8"
+        return resp.text
+    except Exception as e:
+        print(f"API 호출 오류: {e}")
+        return ""
+
+
+def clean_cdata_and_tags(text: str) -> str:
+    """XML CDATA 태그 및 HTML/XML 태그 완벽 제거 유틸리티"""
+    if not text:
+        return ""
+    # CDATA 태그 내부 문자열만 추출
+    text = re.sub(r"", r"\1", text, flags=re.DOTALL | re.IGNORECASE)
+    # 잔여 HTML/XML 태그 제거
+    text = re.sub(r"<[^>]+>", "", text)
+    # HTML 엔티티 변환
+    text = text.replace("<", "<").replace(">", ">").replace("&", "&").replace(""", '"')
+    return text.strip()
+
+
+def extract_tag(tag: str, block: str) -> str:
+    """XML 블록에서 특정 태그의 텍스트를 정교하게 추출 (CDATA 완벽 처리)"""
+    m = re.search(rf"<{tag}[^>]*>(.*?)", block, re.DOTALL | re.IGNORECASE)
+    if not m:
+        return ""
+    return clean_cdata_and_tags(m.group(1))
+
 
 def ceil1(x: float) -> float:
     return math.ceil(round(x, 4) * 10 - 1e-9) / 10
@@ -84,121 +116,79 @@ def parse_ratio_input(text: str):
         return None
 
 
-def extract_tag(tag, block):
-    m = re.search(rf"<{tag}[^>]*>(.*?)", block, re.DOTALL | re.IGNORECASE)
-    if not m:
-        return ""
-    inner = m.group(1)
-    cdata = re.search(r"", inner, re.DOTALL | re.IGNORECASE)
-    raw = cdata.group(1) if cdata else inner
-    return raw.strip()
-
-
-def safe_api_get(url, params):
-    """캐시 방지 헤더를 추가한 안전한 HTTP GET 요청 유틸리티"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache",
-    }
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=12)
-        resp.encoding = "utf-8"
-        return resp.text
-    except Exception as e:
-        print(f"[API Error] {url} - {e}")
-        return ""
-
-
 # ----------------------------------------------------------------------
-# 자치법규(조례) API (다중 검색 및 파싱 완벽 견고화)
+# 자치법규(조례) API
 # ----------------------------------------------------------------------
 
 def count_all_ordinances(city_name: str) -> int:
     """해당 지자체의 전체 자치법규 수 조회"""
-    xml_text = safe_api_get(SEARCH_URL, {"OC": OC_KEY, "target": "ordin", "type": "XML", "query": city_name, "display": 1})
-    if not xml_text:
-        return -1
-
-    #  또는  검색
-    m = re.search(r"<(?:totalcnt|totalCnt)>(.*?)", xml_text, re.IGNORECASE)
-    if m and m.group(1).strip().isdigit():
-        return int(m.group(1).strip())
-
-    # 태그를 찾을 수 없는 경우 법령 항목 직접 수 세기
+    params = {"OC": OC_KEY, "target": "ordin", "type": "XML", "query": city_name, "display": 1}
+    xml_text = safe_api_get(SEARCH_URL, params)
+    
+    m = re.search(r"<(?:totalcnt|totalCount)>(.*?)", xml_text, re.IGNORECASE)
+    if m:
+        val = clean_cdata_and_tags(m.group(1))
+        if val.isdigit():
+            return int(val)
+    
     laws = re.findall(r"<(?:law|ordin)\b[^>]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
     return len(laws)
 
 
 def search_building_ordinance(city_name: str):
-    """
-    지자체 건축조례 검색 (다단계 키워드 폴백 적용)
-    """
-    city_clean = city_name.strip()
-    city_nospace = city_clean.replace(" ", "")
+    """건축조례 검색 (원작 알고리즘 100% 보존 + XML 파싱 보완)"""
+    keyword = "건축 조례"
+    city_nospace = city_name.replace(" ", "")
+    keyword_nospace = keyword.replace(" ", "")
 
-    # 검색 후보 키워드 생성 (예: '울산광역시 건축조례', '울산광역시 건축', '울산 건축')
-    search_queries = [f"{city_clean} 건축조례", f"{city_clean} 건축"]
-    if "광역시" in city_clean:
-        short_city = city_clean.replace("광역시", "").strip()
-        search_queries.append(f"{short_city} 건축")
-    elif "특별자치시" in city_clean:
-        short_city = city_clean.replace("특별자치시", "").strip()
-        search_queries.append(f"{short_city} 건축")
-
-    all_found_laws = []
-    seen_mst = set()
-
-    for query_str in search_queries:
-        page = 1
-        while page <= 3:
-            params = {
-                "OC": OC_KEY,
-                "target": "ordin",
-                "type": "XML",
-                "query": query_str,
-                "display": 100,
-                "page": page,
-            }
-            xml_text = safe_api_get(SEARCH_URL, params)
-            if not xml_text:
-                break
-
-            # law 또는 ordin 태그 모두 대응
-            laws = re.findall(r"<(?:law|ordin)\b[^>]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
-            if not laws:
-                break
-
-            for law in laws:
-                name = extract_tag("자치법규명", law) or extract_tag("조례명", law)
-                mst = extract_tag("자치법규일련번호", law) or extract_tag("자치법규ID", law) or extract_tag("MST", law)
-
-                if mst and mst not in seen_mst:
-                    seen_mst.add(mst)
-                    all_found_laws.append((name, mst, law))
-
-            if len(laws) < 100:
-                break
-            page += 1
-
-        # 검색 결과로 '건축' 관련 조례가 발견되었다면 다음 폴백 검색어 스킵
-        if any("건축" in name for name, _, _ in all_found_laws):
+    all_laws = []
+    page = 1
+    total_cnt = None
+    
+    while True:
+        params = {
+            "OC": OC_KEY, "target": "ordin", "type": "XML",
+            "query": f"{city_name} {keyword}", "display": 100, "page": page,
+        }
+        xml_text = safe_api_get(SEARCH_URL, params)
+        if not xml_text:
             break
 
-    # 필터링: 조례명에 '건축'이 들어가는 항목만 추출
+        if total_cnt is None:
+            m = re.search(r"<(?:totalcnt|totalCount)>(.*?)", xml_text, re.IGNORECASE)
+            if m:
+                val = clean_cdata_and_tags(m.group(1))
+                total_cnt = int(val) if val.isdigit() else 0
+            else:
+                total_cnt = 0
+
+        laws = re.findall(r"<(?:law|ordin)\b[^>]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
+        if not laws:
+            break
+            
+        all_laws.extend(laws)
+        if len(all_laws) >= total_cnt or len(laws) < 100:
+            break
+        page += 1
+
     results = []
-    for name, mst, _ in all_found_laws:
-        if "건축" in name:
+    seen_mst = set()
+    for law in all_laws:
+        name = extract_tag("자치법규명", law) or extract_tag("조례명", law)
+        mst = extract_tag("자치법규일련번호", law) or extract_tag("자치법규ID", law) or extract_tag("MST", law)
+        
+        if mst and mst not in seen_mst:
+            seen_mst.add(mst)
             results.append((name, mst))
 
-    # 지자체명과 완벽히 매칭되는 건축조례 우선 정렬
     def score(item):
         name_ns = item[0].replace(" ", "")
-        target_exact = city_nospace + "건축조례"
-        if name_ns == target_exact:
+        if name_ns == city_nospace + keyword_nospace:
             return 0
-        if city_nospace in name_ns and "건축" in name_ns and "조례" in name_ns:
-            return 1
+        if name_ns.startswith(city_nospace) and name_ns.endswith(keyword_nospace):
+            middle = name_ns[len(city_nospace):-len(keyword_nospace)]
+            if middle == "":
+                return 1
         return 2
 
     results.sort(key=score)
@@ -211,15 +201,19 @@ def fetch_ordinance_body(mst: str) -> str:
 
 
 def extract_landscape_articles(full_text: str):
-    articles = re.findall(r"]*>.*?", full_text, re.DOTALL)
+    articles = re.findall(r"<(?:조|조문단위)\b[^>]*>.*?", full_text, re.DOTALL | re.IGNORECASE)
     result = []
     for art in articles:
-        if "조경" not in art and "필로티" not in art:
+        art_clean = clean_cdata_and_tags(art)
+        if "조경" not in art_clean and "필로티" not in art_clean:
             continue
-        title = extract_tag("조제목", art)
-        content = extract_tag("조내용", art)
+        title = extract_tag("조제목", art) or extract_tag("조문제목", art)
+        content = extract_tag("조내용", art) or extract_tag("조문내용", art)
+        if not content:
+            content = art_clean
+            
         content = re.sub(r"[ \t]+\n", "\n", content).strip()
-        has_piloti = "필로티" in art
+        has_piloti = "필로티" in art_clean
         result.append((title, content, has_piloti))
     return result
 
@@ -273,7 +267,7 @@ _ADMRUL_CACHE = {"body": None, "fetched": False, "error": None}
 def search_admrul_exact(keyword: str):
     params = {"OC": OC_KEY, "target": "admrul", "type": "XML", "query": keyword, "display": 20}
     xml_text = safe_api_get(SEARCH_URL, params)
-    laws = re.findall(r"]*>.*?", xml_text, re.DOTALL)
+    laws = re.findall(r"]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
     for law in laws:
         name = extract_tag("행정규칙명", law)
         rul_id = extract_tag("행정규칙일련번호", law)
@@ -288,11 +282,12 @@ def fetch_admrul_body(rul_id: str) -> str:
 
 
 def extract_admrul_article(full_text: str, article_no: int):
-    blocks = re.findall(r"\s*\s*", full_text, re.DOTALL | re.IGNORECASE)
+    blocks = re.findall(r"(.*?)", full_text, re.DOTALL | re.IGNORECASE)
     prefix = f"제{article_no}조"
     for b in blocks:
-        if b.strip().startswith(prefix):
-            return b.strip()
+        b_clean = clean_cdata_and_tags(b)
+        if b_clean.startswith(prefix):
+            return b_clean
     return None
 
 
@@ -364,7 +359,7 @@ _LAW_CACHE = {}
 def search_law_exact(keyword: str):
     params = {"OC": OC_KEY, "target": "law", "type": "XML", "query": keyword, "display": 20}
     xml_text = safe_api_get(SEARCH_URL, params)
-    laws = re.findall(r"]*>.*?", xml_text, re.DOTALL)
+    laws = re.findall(r"]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
     for law in laws:
         name = extract_tag("법령명한글", law)
         mst = extract_tag("법령일련번호", law)
@@ -397,15 +392,15 @@ def get_law_body(law_name: str):
 
 
 def extract_law_article(full_text: str, article_no: int):
-    articles = re.findall(r"]*>.*?", full_text, re.DOTALL)
+    articles = re.findall(r"]*>.*?", full_text, re.DOTALL | re.IGNORECASE)
     for art in articles:
-        no_m = re.search(r"(.*?)", art)
-        if no_m and no_m.group(1).strip() == str(article_no):
+        no_m = re.search(r"(.*?)", art, re.IGNORECASE)
+        if no_m and clean_cdata_and_tags(no_m.group(1)) == str(article_no):
             title = extract_tag("조문제목", art)
-            hangs = re.findall(r"\s*\s*", art, re.DOTALL | re.IGNORECASE)
+            hangs = re.findall(r"(.*?)", art, re.DOTALL | re.IGNORECASE)
             lines = []
             for h in hangs:
-                clean = re.sub(r"<[^>]+>", " ", h)
+                clean = clean_cdata_and_tags(h)
                 clean = re.sub(r"\s+", " ", clean).strip()
                 if clean:
                     lines.append(clean)
@@ -655,9 +650,8 @@ def search():
     if not city:
         return render_template("index.html", city="", results=None, total=None)
     try:
+        total = count_all_ordinances(city)
         results = search_building_ordinance(city)
-        total_count = count_all_ordinances(city)
-        total = max(total_count, len(results))
     except Exception as e:
         return render_template("index.html", city=city, results=[], total=None,
                                error=f"검색 중 오류: {e}")
@@ -787,7 +781,6 @@ def favorites_remove():
 
 
 def get_local_ip():
-    """이 컴퓨터의 LAN IP 주소를 자동으로 확인 (폰 접속 안내용)"""
     import socket
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -806,7 +799,7 @@ def open_browser():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     is_frozen = getattr(sys, "frozen", False)
-
+    
     if "PORT" not in os.environ:
         local_ip = get_local_ip()
         print("=" * 60)
