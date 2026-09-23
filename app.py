@@ -64,7 +64,6 @@ def safe_parse_xml(xml_text: str):
     if not xml_text:
         return None
     try:
-        # 시작 부분의 공백 등이 파싱을 방해하지 않도록 strip 처리
         return ET.fromstring(xml_text.strip())
     except ET.ParseError as e:
         print(f"XML 파싱 에러: {e}")
@@ -133,7 +132,7 @@ def parse_ratio_input(text: str):
 
 
 # ----------------------------------------------------------------------
-# 자치법규(조례) API - 완전히 새롭게 개선된 검색 로직 (ElementTree 사용)
+# 자치법규(조례) API 검색 로직
 # ----------------------------------------------------------------------
 
 def count_all_ordinances(city_name: str) -> int:
@@ -152,14 +151,12 @@ def count_all_ordinances(city_name: str) -> int:
 def search_building_ordinance(city_name: str):
     city_clean = city_name.strip()
     all_laws = []
-    
-    # 지자체명과 건축조례를 조합하여 검색
     queries_to_try = [f"{city_clean} 건축조례", f"{city_clean} 건축 조례", city_clean]
     
     for q in queries_to_try:
         page = 1
         found_in_query = False
-        while page <= 3:  # 최대 3페이지까지만 확인
+        while page <= 3:
             params = {
                 "OC": OC_KEY, "target": "ordin", "type": "XML",
                 "query": q, "display": 100, "page": page,
@@ -170,7 +167,6 @@ def search_building_ordinance(city_name: str):
             if root is None:
                 break
 
-            # 태그 구조 호환성 대응 ('ordin' 또는 'law')
             items = root.findall('.//ordin')
             if not items:
                 items = root.findall('.//law')
@@ -187,11 +183,11 @@ def search_building_ordinance(city_name: str):
                         all_laws.append((name_node.text.strip(), seq_node.text.strip()))
                 found_in_query = True
             else:
-                break  # 이 페이지에 데이터가 없으면 다음 루프 탈출
+                break
             page += 1
             
         if found_in_query:
-            break  # 상세 검색어에서 결과를 찾았으면 더 넓은 범위의 검색어는 시도 안 함
+            break
 
     results = []
     seen_mst = set()
@@ -199,14 +195,11 @@ def search_building_ordinance(city_name: str):
 
     for name, mst in all_laws:
         name_nospace = name.replace(" ", "")
-        
-        # 필터링: '건축'과 '조례'가 모두 포함된 항목만 추가
         if "건축" in name_nospace and "조례" in name_nospace:
             if mst not in seen_mst:
                 seen_mst.add(mst)
                 results.append((name, mst))
 
-    # 검색 우선순위 정렬
     def score(item):
         name_ns = item[0].replace(" ", "")
         target_exact = city_nospace + "건축조례"
@@ -281,11 +274,13 @@ def get_main_landscape_article(articles):
     for title, content, _ in articles:
         if "조경" in title:
             return content
+    if articles:
+        return articles[0][1] # 조경 제목이 정확히 안 잡히면 첫 번째 항목 반환
     return ""
 
 
 # ----------------------------------------------------------------------
-# 국토교통부 고시 「조경기준」
+# 국토교통부 고시 「조경기준」 및 건축법 시행령
 # ----------------------------------------------------------------------
 
 _ADMRUL_CACHE = {"body": None, "fetched": False, "error": None}
@@ -377,10 +372,6 @@ def extract_planting_pct_from_ordinance(ordinance_content: str):
     m = re.search(r"([\d.]+)\s*퍼센트[^식]{0,10}식재의무면적", ordinance_content)
     return float(m.group(1)) if m else None
 
-
-# ----------------------------------------------------------------------
-# 건축법 시행령
-# ----------------------------------------------------------------------
 
 _LAW_CACHE = {}
 
@@ -580,10 +571,10 @@ def compute_defaults(main_content: str, city: str):
         piloti_source = f"{city} 조례 {main_no or ''}".strip()
     elif piloti_found:
         piloti_cap_pct = 33.3
-        piloti_source = "조례에 언급있으나 수치미확인 - 원문 확인 필요"
+        piloti_source = "조례에 언급있으나 수치미확인"
     else:
         piloti_cap_pct = 33.3
-        piloti_source = "확인 불가 - 원문 확인 필요"
+        piloti_source = "확인 불가"
 
     piloti_ratio_val = (piloti_recognition_ratio * 100) if piloti_recognition_ratio is not None else None
 
@@ -646,14 +637,14 @@ def run_calculation(main_content, city, site_area, tier_pct, exempt_mult,
         rows.append({"label": f"② 식재의무면적 (①×{planting_frac}, 근거: {planting_source})",
                      "value": f"{fmt1(planting_min)}㎡"})
     else:
-        rows.append({"label": "② 식재의무면적", "value": "확인 불가 - 원문 확인 필요"})
+        rows.append({"label": "② 식재의무면적", "value": "확인 불가"})
 
     if natural_pct is not None:
         natural_frac = pct_to_korean_fraction(natural_pct)
         rows.append({"label": f"③ 자연지반 최소 면적 (①×{natural_frac}, 근거: {natural_source})",
                      "value": f"{fmt1(natural_min)}㎡"})
     else:
-        rows.append({"label": "③ 자연지반 최소 면적", "value": "확인 불가 - 원문 확인 필요"})
+        rows.append({"label": "③ 자연지반 최소 면적", "value": "확인 불가"})
 
     roof_frac = pct_to_korean_fraction(roof_cap_pct * 100)
     piloti_frac = pct_to_korean_fraction(piloti_cap_pct * 100)
@@ -667,7 +658,7 @@ def run_calculation(main_content, city, site_area, tier_pct, exempt_mult,
 
 
 # ----------------------------------------------------------------------
-# 라우트
+# 라우트 (안전한 파라미터 처리 추가)
 # ----------------------------------------------------------------------
 
 @app.route("/")
@@ -693,8 +684,10 @@ def search():
 
 @app.route("/calculator", methods=["GET", "POST"])
 def calculator():
+    # GET과 POST 모든 요청에서 city와 mst를 안전하게 추출
     city = request.values.get("city", "").strip()
     mst = request.values.get("mst", "").strip()
+    
     if not city or not mst:
         return redirect(url_for("home"))
 
@@ -712,7 +705,7 @@ def calculator():
     result_rows = None
     form = {
         "site_area": "1500",
-        "tier_pct": tiers[0][1] if tiers else "",
+        "tier_pct": tiers[0][1] if tiers else "10",
         "exempt_mult": "1.0",
         "roof_input": defaults["roof_default_frac"],
         "piloti_input": defaults["piloti_default_frac"],
@@ -720,7 +713,7 @@ def calculator():
 
     if request.method == "POST":
         form["site_area"] = request.form.get("site_area", "1500")
-        form["tier_pct"] = request.form.get("tier_pct", "")
+        form["tier_pct"] = request.form.get("tier_pct", "10")
         form["exempt_mult"] = request.form.get("exempt_mult", "1.0")
         form["roof_input"] = request.form.get("roof_input", defaults["roof_default_frac"])
         form["piloti_input"] = request.form.get("piloti_input", defaults["piloti_default_frac"])
