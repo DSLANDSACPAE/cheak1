@@ -97,7 +97,7 @@ def extract_tag(tag, block):
 
 
 # ----------------------------------------------------------------------
-# 자치법규(조례) API (검색 로직 보완)
+# 자치법규(조례) API (검색 로직 및 XML 파싱 보완)
 # ----------------------------------------------------------------------
 
 def count_all_ordinances(city_name: str) -> int:
@@ -106,6 +106,7 @@ def count_all_ordinances(city_name: str) -> int:
     try:
         resp = requests.get(SEARCH_URL, params=params, timeout=15)
         resp.encoding = "utf-8"
+        # totalcnt 태그를 정확히 매칭하도록 수정
         m = re.search(r"(\d+)", resp.text, re.IGNORECASE)
         return int(m.group(1)) if m else -1
     except Exception:
@@ -115,7 +116,6 @@ def count_all_ordinances(city_name: str) -> int:
 def search_building_ordinance(city_name: str):
     """
     지자체 건축조례 검색
-    API 특성(공백 검색 오작동)을 고려하여 '지자체명 건축조례' -> '지자체명 건축' 단계적 재검색 수행
     """
     city_nospace = city_name.replace(" ", "")
     query_str = f"{city_name} 건축조례"
@@ -140,9 +140,11 @@ def search_building_ordinance(city_name: str):
             break
 
         if total_cnt is None:
+            # totalcnt 태그를 정확히 매칭하도록 수정
             m = re.search(r"(\d+)", resp.text, re.IGNORECASE)
             total_cnt = int(m.group(1)) if m else 0
 
+        # law 태그 추출 정규식 원복 및 수정
         laws = re.findall(r"]*>.*?", resp.text, re.DOTALL)
         
         # 1차 검색 결과가 없는 경우 '지자체명 건축'으로 2차 검색 진행
