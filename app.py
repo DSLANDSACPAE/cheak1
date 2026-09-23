@@ -87,8 +87,15 @@ def fmt1(x: float) -> str:
 
 
 def pct_to_korean_fraction(pct: float) -> str:
-    frac = Fraction(pct / 100).limit_denominator(20)
-    return f"{frac.denominator}분의{frac.numerator}"
+    if pct is None:
+        return "확인 불가"
+    try:
+        frac = Fraction(pct / 100).limit_denominator(20)
+        if frac.numerator == 0:
+            return "0"
+        return f"{frac.denominator}분의{frac.numerator}"
+    except Exception:
+        return f"{pct}%"
 
 
 def korean_fraction_to_float(text: str):
@@ -282,7 +289,7 @@ def fetch_admrul_body(rul_id: str) -> str:
 
 
 def extract_admrul_article(full_text: str, article_no: int):
-    blocks = re.findall(r"(.*?)", full_text, re.DOTALL | re.IGNORECASE)
+    blocks = re.findall(r"<(?:조문단위|조)\b[^>]*>.*?", full_text, re.DOTALL | re.IGNORECASE)
     prefix = f"제{article_no}조"
     for b in blocks:
         b_clean = clean_cdata_and_tags(b)
@@ -392,12 +399,12 @@ def get_law_body(law_name: str):
 
 
 def extract_law_article(full_text: str, article_no: int):
-    articles = re.findall(r"]*>.*?", full_text, re.DOTALL | re.IGNORECASE)
+    articles = re.findall(r"<(?:조문단위|조)\b[^>]*>.*?", full_text, re.DOTALL | re.IGNORECASE)
     for art in articles:
-        no_m = re.search(r"(.*?)", art, re.IGNORECASE)
+        no_m = re.search(r"<(?:조문번호|조번호)>(.*?)", art, re.IGNORECASE)
         if no_m and clean_cdata_and_tags(no_m.group(1)) == str(article_no):
             title = extract_tag("조문제목", art)
-            hangs = re.findall(r"(.*?)", art, re.DOTALL | re.IGNORECASE)
+            hangs = re.findall(r"<(?:항내용|항)\b[^>]*>(.*?)", art, re.DOTALL | re.IGNORECASE)
             lines = []
             for h in hangs:
                 clean = clean_cdata_and_tags(h)
@@ -554,13 +561,15 @@ def compute_defaults(main_content: str, city: str):
         piloti_cap_pct = 33.3
         piloti_source = "확인 불가 - 원문 확인 필요"
 
+    piloti_ratio_val = (piloti_recognition_ratio * 100) if piloti_recognition_ratio is not None else None
+
     return {
         "main_no": main_no,
         "roof_default_frac": pct_to_korean_fraction(roof_cap_pct),
         "roof_ratio_frac": pct_to_korean_fraction(roof_ratio) if roof_ratio is not None else "확인 불가",
         "roof_source": roof_source,
         "piloti_default_frac": pct_to_korean_fraction(piloti_cap_pct),
-        "piloti_ratio_frac": pct_to_korean_fraction(piloti_recognition_ratio * 100) if piloti_recognition_ratio is not None else "확인 불가",
+        "piloti_ratio_frac": pct_to_korean_fraction(piloti_ratio_val) if piloti_ratio_val is not None else "확인 불가",
         "piloti_source": piloti_source,
     }
 
