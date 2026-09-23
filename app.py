@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
-# 대지안의 조경 기준 조회 프로그램 (모바일 웹앱 버전 / exe 실행파일 겸용 / 클라우드 배포 겸용)
+"""
+대지안의 조경 기준 조회 프로그램 (모바일 웹앱 버전 / exe 실행파일 겸용 / 클라우드 배포 겸용)
+- 데스크톱 app.py와 동일한 로직(API 호출, 정규식 추출)을 그대로 재사용
+- 실행: python app.py  (또는 빌드된 .exe 더블클릭)
+- 접속: 컴퓨터와 같은 와이파이에 연결된 폰 브라우저에서 http://:5000
+필요 라이브러리: pip install flask requests gunicorn
+"""
 
-import html
 import json
 import math
 import os
@@ -9,11 +14,10 @@ import re
 import sys
 import threading
 import webbrowser
-import xml.etree.ElementTree as ET
 from fractions import Fraction
 
 import requests
-from flask import Flask, render_template, request, redirect, url_for
+from flask import Flask, redirect, render_template, request, url_for
 
 OC_KEY = "dsland"
 SEARCH_URL = "http://www.law.go.kr/DRF/lawSearch.do"
@@ -25,6 +29,10 @@ FAVORITES_FILE = os.path.join(DATA_DIR, "favorites.json")
 
 
 def resource_path(relative_path: str) -> str:
+    """
+    개발 중(python app.py)과 PyInstaller로 exe 빌드된 이후 모두에서
+    templates/static 폴더를 정확히 찾기 위한 경로 처리.
+    """
     base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, relative_path)
 
@@ -37,54 +45,8 @@ app = Flask(
 
 
 # ----------------------------------------------------------------------
-# 공통 유틸 및 강력한 XML 파싱 (정규식 제거)
+# 공통 유틸
 # ----------------------------------------------------------------------
-
-def safe_api_get(url: str, params: dict) -> str:
-    """봇 차단을 피하기 위해 브라우저 헤더를 추가하여 API를 호출합니다."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/xml, text/xml, */*; q=0.01"
-    }
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=15)
-        resp.encoding = "utf-8"
-        if resp.status_code == 200:
-            return resp.text
-        else:
-            print(f"API 응답 에러: HTTP {resp.status_code}")
-            return ""
-    except Exception as e:
-        print(f"API 호출 오류: {e}")
-        return ""
-
-
-def safe_parse_xml(xml_text: str):
-    """XML 텍스트를 파싱하여 ElementTree 객체로 반환합니다."""
-    if not xml_text:
-        return None
-    try:
-        return ET.fromstring(xml_text.strip())
-    except ET.ParseError as e:
-        print(f"XML 파싱 에러: {e}")
-        return None
-
-
-def clean_cdata_and_tags(text: str) -> str:
-    if not text:
-        return ""
-    text = re.sub(r"", r"\1", text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = html.unescape(text)
-    return text.strip()
-
-
-def extract_tag(tag: str, block: str) -> str:
-    m = re.search(rf"<{tag}[^>]*>(.*?)", block, re.DOTALL | re.IGNORECASE)
-    if not m:
-        return ""
-    return clean_cdata_and_tags(m.group(1))
-
 
 def ceil1(x: float) -> float:
     return math.ceil(round(x, 4) * 10 - 1e-9) / 10
@@ -95,15 +57,8 @@ def fmt1(x: float) -> str:
 
 
 def pct_to_korean_fraction(pct: float) -> str:
-    if pct is None:
-        return "확인 불가"
-    try:
-        frac = Fraction(pct / 100).limit_denominator(20)
-        if frac.numerator == 0:
-            return "0"
-        return f"{frac.denominator}분의{frac.numerator}"
-    except Exception:
-        return f"{pct}%"
+    frac = Fraction(pct / 100).limit_denominator(20)
+    return f"{frac.denominator}분의{frac.numerator}"
 
 
 def korean_fraction_to_float(text: str):
@@ -131,85 +86,69 @@ def parse_ratio_input(text: str):
         return None
 
 
+def extract_tag(tag, block):
+    m = re.search(rf"<{tag}[^>]*>(.*?)", block, re.DOTALL)
+    if not m:
+        return ""
+    inner = m.group(1)
+    cdata = re.search(r"", inner, re.DOTALL)
+    raw = cdata.group(1) if cdata else inner
+    return raw.strip()
+
+
 # ----------------------------------------------------------------------
-# 자치법규(조례) API 검색 로직
+# 자치법규(조례) API
 # ----------------------------------------------------------------------
 
 def count_all_ordinances(city_name: str) -> int:
     params = {"OC": OC_KEY, "target": "ordin", "type": "XML", "query": city_name, "display": 1}
-    xml_text = safe_api_get(SEARCH_URL, params)
-    root = safe_parse_xml(xml_text)
-    
-    if root is not None:
-        for tag in ['totalCnt', 'totalCount', 'totalcnt']:
-            node = root.find(tag)
-            if node is not None and node.text and node.text.strip().isdigit():
-                return int(node.text.strip())
-    return 0
+    resp = requests.get(SEARCH_URL, params=params, timeout=15)
+    resp.encoding = "utf-8"
+    m = re.search(r"(\d+)", resp.text)
+    return int(m.group(1)) if m else -1
 
 
 def search_building_ordinance(city_name: str):
-    city_clean = city_name.strip()
-    all_laws = []
-    queries_to_try = [f"{city_clean} 건축조례", f"{city_clean} 건축 조례", city_clean]
-    
-    for q in queries_to_try:
-        page = 1
-        found_in_query = False
-        while page <= 3:
-            params = {
-                "OC": OC_KEY, "target": "ordin", "type": "XML",
-                "query": q, "display": 100, "page": page,
-            }
-            xml_text = safe_api_get(SEARCH_URL, params)
-            root = safe_parse_xml(xml_text)
-            
-            if root is None:
-                break
+    keyword = "건축 조례"
+    city_nospace = city_name.replace(" ", "")
+    keyword_nospace = keyword.replace(" ", "")
 
-            items = root.findall('.//ordin')
-            if not items:
-                items = root.findall('.//law')
-            
-            if items:
-                for item in items:
-                    name_node = item.find('ordinNm') if item.find('ordinNm') is not None else item.find('lawNm')
-                    if name_node is None: name_node = item.find('자치법규명')
-                    
-                    seq_node = item.find('ordinSeq') if item.find('ordinSeq') is not None else item.find('MST')
-                    if seq_node is None: seq_node = item.find('자치법규일련번호')
-                    
-                    if name_node is not None and seq_node is not None and name_node.text and seq_node.text:
-                        all_laws.append((name_node.text.strip(), seq_node.text.strip()))
-                found_in_query = True
-            else:
-                break
-            page += 1
-            
-        if found_in_query:
+    all_laws = []
+    page = 1
+    total_cnt = None
+    while True:
+        params = {
+            "OC": OC_KEY, "target": "ordin", "type": "XML",
+            "query": f"{city_name} {keyword}", "display": 100, "page": page,
+        }
+        resp = requests.get(SEARCH_URL, params=params, timeout=15)
+        resp.encoding = "utf-8"
+        if total_cnt is None:
+            m = re.search(r"(\d+)", resp.text)
+            total_cnt = int(m.group(1)) if m else 0
+        laws = re.findall(r"]*>.*?", resp.text, re.DOTALL)
+        if not laws:
             break
+        all_laws.extend(laws)
+        if len(all_laws) >= total_cnt or len(laws) < 100:
+            break
+        page += 1
 
     results = []
-    seen_mst = set()
-    city_nospace = city_clean.replace(" ", "")
-
-    for name, mst in all_laws:
-        name_nospace = name.replace(" ", "")
-        if "건축" in name_nospace and "조례" in name_nospace:
-            if mst not in seen_mst:
-                seen_mst.add(mst)
-                results.append((name, mst))
+    for law in all_laws:
+        name = extract_tag("자치법규명", law)
+        mst = extract_tag("자치법규일련번호", law)
+        results.append((name, mst))
 
     def score(item):
         name_ns = item[0].replace(" ", "")
-        target_exact = city_nospace + "건축조례"
-        if name_ns == target_exact:
+        if name_ns == city_nospace + keyword_nospace:
             return 0
-        if name_ns.startswith(city_nospace) and "건축조례" in name_ns:
-            return 1
-        if "건축조례" in name_ns:
-            return 2
-        return 3
+        if name_ns.startswith(city_nospace) and name_ns.endswith(keyword_nospace):
+            middle = name_ns[len(city_nospace):-len(keyword_nospace)]
+            if middle == "":
+                return 1
+        return 2
 
     results.sort(key=score)
     return results
@@ -217,23 +156,21 @@ def search_building_ordinance(city_name: str):
 
 def fetch_ordinance_body(mst: str) -> str:
     params = {"OC": OC_KEY, "target": "ordin", "MST": mst, "type": "XML"}
-    return safe_api_get(SERVICE_URL, params)
+    resp = requests.get(SERVICE_URL, params=params, timeout=15)
+    resp.encoding = "utf-8"
+    return resp.text
 
 
 def extract_landscape_articles(full_text: str):
-    articles = re.findall(r"<(?:조|조문단위)\b[^>]*>.*?", full_text, re.DOTALL | re.IGNORECASE)
+    articles = re.findall(r"]*>.*?", full_text, re.DOTALL)
     result = []
     for art in articles:
-        art_clean = clean_cdata_and_tags(art)
-        if "조경" not in art_clean and "필로티" not in art_clean:
+        if "조경" not in art and "필로티" not in art:
             continue
-        title = extract_tag("조제목", art) or extract_tag("조문제목", art)
-        content = extract_tag("조내용", art) or extract_tag("조문내용", art)
-        if not content:
-            content = art_clean
-            
+        title = extract_tag("조제목", art)
+        content = extract_tag("조내용", art)
         content = re.sub(r"[ \t]+\n", "\n", content).strip()
-        has_piloti = "필로티" in art_clean
+        has_piloti = "필로티" in art
         result.append((title, content, has_piloti))
     return result
 
@@ -274,13 +211,11 @@ def get_main_landscape_article(articles):
     for title, content, _ in articles:
         if "조경" in title:
             return content
-    if articles:
-        return articles[0][1] # 조경 제목이 정확히 안 잡히면 첫 번째 항목 반환
     return ""
 
 
 # ----------------------------------------------------------------------
-# 국토교통부 고시 「조경기준」 및 건축법 시행령
+# 국토교통부 고시 「조경기준」 (행정규칙, target=admrul)
 # ----------------------------------------------------------------------
 
 _ADMRUL_CACHE = {"body": None, "fetched": False, "error": None}
@@ -288,30 +223,30 @@ _ADMRUL_CACHE = {"body": None, "fetched": False, "error": None}
 
 def search_admrul_exact(keyword: str):
     params = {"OC": OC_KEY, "target": "admrul", "type": "XML", "query": keyword, "display": 20}
-    xml_text = safe_api_get(SEARCH_URL, params)
-    root = safe_parse_xml(xml_text)
-    if root is not None:
-        for item in root.findall('.//admrul'):
-            name_node = item.find('행정규칙명')
-            id_node = item.find('행정규칙일련번호')
-            if name_node is not None and id_node is not None and name_node.text:
-                if name_node.text.strip() == keyword:
-                    return name_node.text.strip(), id_node.text.strip()
+    resp = requests.get(SEARCH_URL, params=params, timeout=15)
+    resp.encoding = "utf-8"
+    laws = re.findall(r"]*>.*?", resp.text, re.DOTALL)
+    for law in laws:
+        name = extract_tag("행정규칙명", law)
+        rul_id = extract_tag("행정규칙일련번호", law)
+        if name.strip() == keyword:
+            return name, rul_id
     return None, None
 
 
 def fetch_admrul_body(rul_id: str) -> str:
     params = {"OC": OC_KEY, "target": "admrul", "ID": rul_id, "type": "XML"}
-    return safe_api_get(SERVICE_URL, params)
+    resp = requests.get(SERVICE_URL, params=params, timeout=15)
+    resp.encoding = "utf-8"
+    return resp.text
 
 
 def extract_admrul_article(full_text: str, article_no: int):
-    blocks = re.findall(r"<(?:조문단위|조)\b[^>]*>.*?", full_text, re.DOTALL | re.IGNORECASE)
+    blocks = re.findall(r"\s*\s*", full_text, re.DOTALL)
     prefix = f"제{article_no}조"
     for b in blocks:
-        b_clean = clean_cdata_and_tags(b)
-        if b_clean.startswith(prefix):
-            return b_clean
+        if b.strip().startswith(prefix):
+            return b.strip()
     return None
 
 
@@ -373,26 +308,31 @@ def extract_planting_pct_from_ordinance(ordinance_content: str):
     return float(m.group(1)) if m else None
 
 
+# ----------------------------------------------------------------------
+# 건축법 시행령 (법령, target=law)
+# ----------------------------------------------------------------------
+
 _LAW_CACHE = {}
 
 
 def search_law_exact(keyword: str):
     params = {"OC": OC_KEY, "target": "law", "type": "XML", "query": keyword, "display": 20}
-    xml_text = safe_api_get(SEARCH_URL, params)
-    root = safe_parse_xml(xml_text)
-    if root is not None:
-        for item in root.findall('.//law'):
-            name_node = item.find('법령명한글')
-            mst_node = item.find('법령일련번호')
-            if name_node is not None and mst_node is not None and name_node.text:
-                if name_node.text.strip() == keyword:
-                    return name_node.text.strip(), mst_node.text.strip()
+    resp = requests.get(SEARCH_URL, params=params, timeout=15)
+    resp.encoding = "utf-8"
+    laws = re.findall(r"]*>.*?", resp.text, re.DOTALL)
+    for law in laws:
+        name = extract_tag("법령명한글", law)
+        mst = extract_tag("법령일련번호", law)
+        if name.strip() == keyword:
+            return name, mst
     return None, None
 
 
 def fetch_law_body(mst: str) -> str:
     params = {"OC": OC_KEY, "target": "law", "MST": mst, "type": "XML"}
-    return safe_api_get(SERVICE_URL, params)
+    resp = requests.get(SERVICE_URL, params=params, timeout=15)
+    resp.encoding = "utf-8"
+    return resp.text
 
 
 def get_law_body(law_name: str):
@@ -414,15 +354,15 @@ def get_law_body(law_name: str):
 
 
 def extract_law_article(full_text: str, article_no: int):
-    articles = re.findall(r"<(?:조문단위|조)\b[^>]*>.*?", full_text, re.DOTALL | re.IGNORECASE)
+    articles = re.findall(r"]*>.*?", full_text, re.DOTALL)
     for art in articles:
-        no_m = re.search(r"<(?:조문번호|조번호)>(.*?)", art, re.IGNORECASE)
-        if no_m and clean_cdata_and_tags(no_m.group(1)) == str(article_no):
+        no_m = re.search(r"(.*?)", art)
+        if no_m and no_m.group(1).strip() == str(article_no):
             title = extract_tag("조문제목", art)
-            hangs = re.findall(r"<(?:항내용|항)\b[^>]*>(.*?)", art, re.DOTALL | re.IGNORECASE)
+            hangs = re.findall(r"\s*\s*", art, re.DOTALL)
             lines = []
             for h in hangs:
-                clean = clean_cdata_and_tags(h)
+                clean = re.sub(r"<[^>]+>", " ", h)
                 clean = re.sub(r"\s+", " ", clean).strip()
                 if clean:
                     lines.append(clean)
@@ -571,12 +511,10 @@ def compute_defaults(main_content: str, city: str):
         piloti_source = f"{city} 조례 {main_no or ''}".strip()
     elif piloti_found:
         piloti_cap_pct = 33.3
-        piloti_source = "조례에 언급있으나 수치미확인"
+        piloti_source = "조례에 언급있으나 수치미확인 - 원문 확인 필요"
     else:
         piloti_cap_pct = 33.3
-        piloti_source = "확인 불가"
-
-    piloti_ratio_val = (piloti_recognition_ratio * 100) if piloti_recognition_ratio is not None else None
+        piloti_source = "확인 불가 - 원문 확인 필요"
 
     return {
         "main_no": main_no,
@@ -584,7 +522,7 @@ def compute_defaults(main_content: str, city: str):
         "roof_ratio_frac": pct_to_korean_fraction(roof_ratio) if roof_ratio is not None else "확인 불가",
         "roof_source": roof_source,
         "piloti_default_frac": pct_to_korean_fraction(piloti_cap_pct),
-        "piloti_ratio_frac": pct_to_korean_fraction(piloti_ratio_val) if piloti_ratio_val is not None else "확인 불가",
+        "piloti_ratio_frac": pct_to_korean_fraction(piloti_recognition_ratio * 100) if piloti_recognition_ratio is not None else "확인 불가",
         "piloti_source": piloti_source,
     }
 
@@ -637,14 +575,14 @@ def run_calculation(main_content, city, site_area, tier_pct, exempt_mult,
         rows.append({"label": f"② 식재의무면적 (①×{planting_frac}, 근거: {planting_source})",
                      "value": f"{fmt1(planting_min)}㎡"})
     else:
-        rows.append({"label": "② 식재의무면적", "value": "확인 불가"})
+        rows.append({"label": "② 식재의무면적", "value": "확인 불가 - 원문 확인 필요"})
 
     if natural_pct is not None:
         natural_frac = pct_to_korean_fraction(natural_pct)
         rows.append({"label": f"③ 자연지반 최소 면적 (①×{natural_frac}, 근거: {natural_source})",
                      "value": f"{fmt1(natural_min)}㎡"})
     else:
-        rows.append({"label": "③ 자연지반 최소 면적", "value": "확인 불가"})
+        rows.append({"label": "③ 자연지반 최소 면적", "value": "확인 불가 - 원문 확인 필요"})
 
     roof_frac = pct_to_korean_fraction(roof_cap_pct * 100)
     piloti_frac = pct_to_korean_fraction(piloti_cap_pct * 100)
@@ -658,7 +596,7 @@ def run_calculation(main_content, city, site_area, tier_pct, exempt_mult,
 
 
 # ----------------------------------------------------------------------
-# 라우트 (안전한 파라미터 처리 추가)
+# 라우트
 # ----------------------------------------------------------------------
 
 @app.route("/")
@@ -678,16 +616,15 @@ def search():
         results = search_building_ordinance(city)
     except Exception as e:
         return render_template("index.html", city=city, results=[], total=None,
-                               error=f"검색 중 오류: {e}")
+                             error=f"검색 중 오류: {e}")
     return render_template("index.html", city=city, results=results, total=total)
 
 
 @app.route("/calculator", methods=["GET", "POST"])
 def calculator():
-    # GET과 POST 모든 요청에서 city와 mst를 안전하게 추출
+    # GET 방식과 POST 방식 모두 request.values를 사용하여 파라미터(city, mst)를 안전하게 수신
     city = request.values.get("city", "").strip()
     mst = request.values.get("mst", "").strip()
-    
     if not city or not mst:
         return redirect(url_for("home"))
 
@@ -702,18 +639,20 @@ def calculator():
     exempt_items = extract_partial_exemption_items(main_content)
     defaults = compute_defaults(main_content, city)
 
-    result_rows = None
     form = {
         "site_area": "1500",
-        "tier_pct": tiers[0][1] if tiers else "10",
+        "tier_pct": tiers[0][1] if tiers else "",
         "exempt_mult": "1.0",
         "roof_input": defaults["roof_default_frac"],
         "piloti_input": defaults["piloti_default_frac"],
     }
 
+    result_rows = None
+    error_msg = None
+
     if request.method == "POST":
         form["site_area"] = request.form.get("site_area", "1500")
-        form["tier_pct"] = request.form.get("tier_pct", "10")
+        form["tier_pct"] = request.form.get("tier_pct", "")
         form["exempt_mult"] = request.form.get("exempt_mult", "1.0")
         form["roof_input"] = request.form.get("roof_input", defaults["roof_default_frac"])
         form["piloti_input"] = request.form.get("piloti_input", defaults["piloti_default_frac"])
@@ -729,22 +668,20 @@ def calculator():
                 defaults["roof_ratio_frac"], defaults["piloti_ratio_frac"],
             )
             if calc_err:
-                return render_template(
-                    "calculator.html", city=city, mst=mst, tiers=tiers,
-                    exempt_items=exempt_items, defaults=defaults, form=form,
-                    result_rows=None, error=calc_err,
-                )
+                error_msg = calc_err
         except ValueError:
-            return render_template(
-                "calculator.html", city=city, mst=mst, tiers=tiers,
-                exempt_items=exempt_items, defaults=defaults, form=form,
-                result_rows=None, error="숫자를 올바르게 입력해주세요.",
-            )
+            error_msg = "숫자를 올바르게 입력해주세요."
 
     return render_template(
-        "calculator.html", city=city, mst=mst, tiers=tiers,
-        exempt_items=exempt_items, defaults=defaults, form=form,
-        result_rows=result_rows, error=None,
+        "calculator.html", 
+        city=city, 
+        mst=mst, 
+        tiers=tiers,
+        exempt_items=exempt_items, 
+        defaults=defaults, 
+        form=form,
+        result_rows=result_rows, 
+        error=error_msg,
     )
 
 
@@ -807,6 +744,7 @@ def favorites_remove():
 
 
 def get_local_ip():
+    """이 컴퓨터의 LAN IP 주소를 자동으로 확인 (폰 접속 안내용)"""
     import socket
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
