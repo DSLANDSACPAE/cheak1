@@ -52,10 +52,8 @@ def safe_api_get(url: str, params: dict) -> str:
 def clean_cdata_and_tags(text: str) -> str:
     if not text:
         return ""
-    # CDATA 태그 및 HTML 태그 제거
     text = re.sub(r"", r"\1", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
-    # html.unescape를 사용하여 <, >, &, " 등의 엔티티를 안전하게 변환
     text = html.unescape(text)
     return text.strip()
 
@@ -113,7 +111,7 @@ def parse_ratio_input(text: str):
 
 
 # ----------------------------------------------------------------------
-# 자치법규(조례) API
+# 자치법규(조례) API - 검색 로직 수정
 # ----------------------------------------------------------------------
 
 def count_all_ordinances(city_name: str) -> int:
@@ -125,64 +123,73 @@ def count_all_ordinances(city_name: str) -> int:
         val = clean_cdata_and_tags(m.group(1))
         if val.isdigit():
             return int(val)
-    
-    laws = re.findall(r"<(?:law|ordin)\b[^>]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
-    return len(laws)
+    return 0
 
 
 def search_building_ordinance(city_name: str):
-    keyword = "건축 조례"
-    city_nospace = city_name.replace(" ", "")
-    keyword_nospace = keyword.replace(" ", "")
-
+    # 지자체명 단일 검색어로 우선 1차 검색 후, '건축 조례' 및 '건축조례' 포함 항목 필터링
+    city_clean = city_name.strip()
     all_laws = []
-    page = 1
-    total_cnt = None
     
-    while True:
-        params = {
-            "OC": OC_KEY, "target": "ordin", "type": "XML",
-            "query": f"{city_name} {keyword}", "display": 100, "page": page,
-        }
-        xml_text = safe_api_get(SEARCH_URL, params)
-        if not xml_text:
-            break
+    # 1. 지자체명 + 건축조례 붙여서 검색해보고, 없으면 지자체명으로만 검색
+    queries_to_try = [f"{city_clean} 건축조례", f"{city_clean} 건축 조례", city_clean]
+    
+    for q in queries_to_try:
+        page = 1
+        while page <= 3:  # 상위 페이지 검색
+            params = {
+                "OC": OC_KEY, "target": "ordin", "type": "XML",
+                "query": q, "display": 100, "page": page,
+            }
+            xml_text = safe_api_get(SEARCH_URL, params)
+            if not xml_text:
+                break
 
-        if total_cnt is None:
-            m = re.search(r"<(?:totalcnt|totalCount)>(.*?)", xml_text, re.IGNORECASE)
-            if m:
-                val = clean_cdata_and_tags(m.group(1))
-                total_cnt = int(val) if val.isdigit() else 0
-            else:
-                total_cnt = 0
-
-        laws = re.findall(r"<(?:law|ordin)\b[^>]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
-        if not laws:
-            break
+            laws = re.findall(r"<(?:law|ordin|item)\b[^>]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
+            if not laws:
+                #  태그 대신  안의 데이터 구조 대응
+                laws = re.findall(r"]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
             
-        all_laws.extend(laws)
-        if len(all_laws) >= total_cnt or len(laws) < 100:
+            if laws:
+                all_laws.extend(laws)
+                break  # 해당 쿼리로 결과가 발견되면 다음 쿼리 시도 안 함
+            page += 1
+        if all_laws:
             break
-        page += 1
 
     results = []
     seen_mst = set()
-    for law in all_laws:
-        name = extract_tag("자치법규명", law) or extract_tag("조례명", law)
-        mst = extract_tag("자치법규일련번호", law) or extract_tag("자치법규ID", law) or extract_tag("MST", law)
-        
-        if mst and mst not in seen_mst:
-            seen_mst.add(mst)
-            results.append((name, mst))
+    city_nospace = city_clean.replace(" ", "")
 
+    for law in all_laws:
+        name = (extract_tag("자치법규명", law) or 
+                extract_tag("조례명", law) or 
+                extract_tag("lawNm", law) or 
+                extract_tag("ordinNm", law))
+        mst = (extract_tag("자치법규일련번호", law) or 
+               extract_tag("자치법규ID", law) or 
+               extract_tag("MST", law) or 
+               extract_tag("ordinSeq", law))
+        
+        if not name or not mst:
+            continue
+            
+        name_nospace = name.replace(" ", "")
+        
+        # '건축조례' 또는 '건축 조례'가 포함되고 지자체명이 맞는 조례 추출
+        if "건축" in name_nospace and "조례" in name_nospace:
+            if mst not in seen_mst:
+                seen_mst.add(mst)
+                results.append((name, mst))
+
+    # 검색 우선순위 정렬 (예: "울산광역시 건축 조례" 완벽 일치 항목을 최상단으로)
     def score(item):
         name_ns = item[0].replace(" ", "")
-        if name_ns == city_nospace + keyword_nospace:
+        target_exact = city_nospace + "건축조례"
+        if name_ns == target_exact:
             return 0
-        if name_ns.startswith(city_nospace) and name_ns.endswith(keyword_nospace):
-            middle = name_ns[len(city_nospace):-len(keyword_nospace)]
-            if middle == "":
-                return 1
+        if name_ns.startswith(city_nospace) and "건축조례" in name_ns:
+            return 1
         return 2
 
     results.sort(key=score)
