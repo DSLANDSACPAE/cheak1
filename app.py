@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 대지안의 조경 기준 조회 프로그램 (모바일 웹앱 버전 / exe 실행파일 겸용 / 클라우드 배포 겸용)
-- 데스크톱 app.py와 동일한 로직(API 호출, 정규식 추출)을 그대로 재사용
-- 실행: python app.py  (또는 빌드된 .exe 더블클릭)
-- 접속: 컴퓨터와 같은 와이파이에 연결된 폰 브라우저에서 http://:5000
+- 법제처 DRF API 키워드 및 지자체 검색 로직 완벽 보완
 필요 라이브러리: pip install flask requests gunicorn
 """
 
@@ -29,10 +27,6 @@ FAVORITES_FILE = os.path.join(DATA_DIR, "favorites.json")
 
 
 def resource_path(relative_path: str) -> str:
-    """
-    개발 중(python app.py)과 PyInstaller로 exe 빌드된 이후 모두에서
-    templates/static 폴더를 정확히 찾기 위한 경로 처리.
-    """
     base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, relative_path)
 
@@ -91,15 +85,12 @@ def extract_tag(tag, block):
     if not m:
         return ""
     inner = m.group(1).strip()
-    
-    # CDATA 태그 내부 내용 추출
     cdata = re.search(r"", inner, re.IGNORECASE | re.DOTALL)
     if cdata:
         raw = cdata.group(1)
     else:
         raw = re.sub(r"", "", inner, flags=re.IGNORECASE)
 
-    # 문자열 앞뒤의 '>', '<' 문자 제거
     raw = raw.strip().strip(">").strip("<").strip()
     return raw
 
@@ -110,25 +101,23 @@ def extract_tag(tag, block):
 
 def count_all_ordinances(city_name: str) -> int:
     params = {"OC": OC_KEY, "target": "ordin", "type": "XML", "query": city_name, "display": 1}
-    resp = requests.get(SEARCH_URL, params=params, timeout=15)
-    resp.encoding = "utf-8"
-    m = re.search(r"(\d+)", resp.text)
-    return int(m.group(1)) if m else 0
+    try:
+        resp = requests.get(SEARCH_URL, params=params, timeout=15)
+        resp.encoding = "utf-8"
+        m = re.search(r"(\d+)", resp.text)
+        return int(m.group(1)) if m else 0
+    except Exception:
+        return 0
 
 
 def search_building_ordinance(city_name: str):
-    keyword = "건축 조례"
-    city_nospace = city_name.replace(" ", "")
-    keyword_nospace = keyword.replace(" ", "")
+    clean_city = city_name.strip()
+    city_nospace = clean_city.replace(" ", "")
 
     all_laws = []
     
-    # 검색 시도 목록 (예: "수원시 건축 조례", "수원시 건축", "수원시")
-    queries_to_try = [
-        f"{city_name} 건축 조례",
-        f"{city_name} 건축",
-        f"{city_name}"
-    ]
+    # API 검색어 키워드 조합 (단일 단어로 검색 후 내부 필터링)
+    queries_to_try = ["건축조례", "건축", clean_city]
 
     for q in queries_to_try:
         page = 1
@@ -137,8 +126,12 @@ def search_building_ordinance(city_name: str):
         
         while True:
             params = {
-                "OC": OC_KEY, "target": "ordin", "type": "XML",
-                "query": q, "display": 100, "page": page,
+                "OC": OC_KEY, 
+                "target": "ordin", 
+                "type": "XML",
+                "query": q, 
+                "display": 100, 
+                "page": page,
             }
             resp = requests.get(SEARCH_URL, params=params, timeout=15)
             resp.encoding = "utf-8"
@@ -150,14 +143,22 @@ def search_building_ordinance(city_name: str):
             laws = re.findall(r"]*>.*?", resp.text, re.DOTALL)
             if not laws:
                 break
-            current_laws.extend(laws)
-            if len(current_laws) >= total_cnt or len(laws) < 100:
+                
+            # 해당 지자체명이 포함되거나 기관명에 포함된 경우만 1차 수집
+            for law_xml in laws:
+                name = extract_tag("자치법규명", law_xml)
+                org = extract_tag("지자체명", law_xml) or extract_tag("제개정기관명", law_xml)
+                
+                if city_nospace in name.replace(" ", "") or city_nospace in org.replace(" ", ""):
+                    current_laws.append(law_xml)
+                    
+            if page * 100 >= total_cnt or len(laws) < 100:
                 break
             page += 1
 
         if current_laws:
             all_laws = current_laws
-            break  # 결과가 발견되면 검색 종료
+            break
 
     results = []
     seen_mst = set()
@@ -165,29 +166,28 @@ def search_building_ordinance(city_name: str):
     for law in all_laws:
         name = extract_tag("자치법규명", law)
         mst = extract_tag("자치법규일련번호", law)
+        org = extract_tag("지자체명", law) or extract_tag("제개정기관명", law)
         
-        # 해당 지자체 관련 및 건축 관련 키워드가 있는 항목만 필터링
         if name and mst and mst not in seen_mst:
             name_ns = name.replace(" ", "")
-            if city_nospace in name_ns and ("건축" in name_ns or "조례" in name_ns):
+            org_ns = org.replace(" ", "")
+            
+            # 검색한 지자체 관련 조례이면서 건축 관련 조례인 경우 추출
+            if (city_nospace in name_ns or city_nospace in org_ns) and ("건축" in name_ns or "조례" in name_ns):
                 results.append((name, mst))
                 seen_mst.add(mst)
 
-    # 지자체 건축 조례가 우선 노출되도록 정렬
+    # 지자체 건축 조례가 상단에 위치하도록 정렬
     def score(item):
         name_ns = item[0].replace(" ", "")
-        exact_target = city_nospace + keyword_nospace  # 예: "수원시건축조례"
+        exact_target = city_nospace + "건축조례"
         
-        # 1. 지자체명 + 건축조례 완벽일치 (최우선)
         if name_ns == exact_target:
             return 0
-        # 2. 지자체명으로 시작하고 건축조례로 끝나는 경우
-        if name_ns.startswith(city_nospace) and name_ns.endswith(keyword_nospace):
+        if city_nospace in name_ns and "건축조례" in name_ns:
             return 1
-        # 3. 지자체명 + "건축조례" 포함
-        if city_nospace in name_ns and keyword_nospace in name_ns:
+        if city_nospace in name_ns and "건축" in name_ns:
             return 2
-        # 4. 기타 건축 관련 조례
         return 3
 
     results.sort(key=score)
