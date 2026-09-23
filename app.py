@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 대지안의 조경 기준 조회 프로그램 (모바일 웹앱 버전 / exe 실행파일 겸용 / 클라우드 배포 겸용)
-- 법제처 DRF API 키워드 및 지자체 검색 로직 완벽 보완
+- 데스크톱 app.py와 동일한 로직(API 호출, 정규식 추출)을 그대로 재사용
+- 실행: python app.py  (또는 빌드된 .exe 더블클릭)
+- 접속: 컴퓨터와 같은 와이파이에 연결된 폰 브라우저에서 http://:5000
 필요 라이브러리: pip install flask requests gunicorn
 """
 
@@ -27,6 +29,10 @@ FAVORITES_FILE = os.path.join(DATA_DIR, "favorites.json")
 
 
 def resource_path(relative_path: str) -> str:
+    """
+    개발 중(python app.py)과 PyInstaller로 exe 빌드된 이후 모두에서
+    templates/static 폴더를 정확히 찾기 위한 경로 처리.
+    """
     base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, relative_path)
 
@@ -84,15 +90,10 @@ def extract_tag(tag, block):
     m = re.search(rf"<{tag}[^>]*>(.*?)", block, re.DOTALL)
     if not m:
         return ""
-    inner = m.group(1).strip()
-    cdata = re.search(r"", inner, re.IGNORECASE | re.DOTALL)
-    if cdata:
-        raw = cdata.group(1)
-    else:
-        raw = re.sub(r"", "", inner, flags=re.IGNORECASE)
-
-    raw = raw.strip().strip(">").strip("<").strip()
-    return raw
+    inner = m.group(1)
+    cdata = re.search(r"", inner, re.DOTALL | re.IGNORECASE)
+    raw = cdata.group(1) if cdata else inner
+    return raw.strip()
 
 
 # ----------------------------------------------------------------------
@@ -100,95 +101,80 @@ def extract_tag(tag, block):
 # ----------------------------------------------------------------------
 
 def count_all_ordinances(city_name: str) -> int:
+    """해당 지자체의 전체 자치법규 수 조회"""
     params = {"OC": OC_KEY, "target": "ordin", "type": "XML", "query": city_name, "display": 1}
     try:
         resp = requests.get(SEARCH_URL, params=params, timeout=15)
         resp.encoding = "utf-8"
-        m = re.search(r"(\d+)", resp.text)
-        return int(m.group(1)) if m else 0
+        m = re.search(r"(\d+)", resp.text, re.IGNORECASE)
+        return int(m.group(1)) if m else -1
     except Exception:
-        return 0
+        return -1
 
 
 def search_building_ordinance(city_name: str):
-    clean_city = city_name.strip()
-    city_nospace = clean_city.replace(" ", "")
+    """
+    지자체 건축조례 검색
+    API 특성(공백 검색 오작동)을 고려하여 '지자체명 건축조례' -> '지자체명 건축' 단계적 재검색 수행
+    """
+    city_nospace = city_name.replace(" ", "")
+    query_str = f"{city_name} 건축조례"
 
     all_laws = []
-    
-    # API 검색어 키워드 조합 (단일 단어로 검색 후 내부 필터링)
-    queries_to_try = ["건축조례", "건축", clean_city]
+    page = 1
+    total_cnt = None
 
-    for q in queries_to_try:
-        page = 1
-        total_cnt = None
-        current_laws = []
-        
-        while True:
-            params = {
-                "OC": OC_KEY, 
-                "target": "ordin", 
-                "type": "XML",
-                "query": q, 
-                "display": 100, 
-                "page": page,
-            }
+    while True:
+        params = {
+            "OC": OC_KEY,
+            "target": "ordin",
+            "type": "XML",
+            "query": query_str,
+            "display": 100,
+            "page": page,
+        }
+        try:
             resp = requests.get(SEARCH_URL, params=params, timeout=15)
             resp.encoding = "utf-8"
-            
-            if total_cnt is None:
-                m = re.search(r"(\d+)", resp.text)
-                total_cnt = int(m.group(1)) if m else 0
-                
-            laws = re.findall(r"]*>.*?", resp.text, re.DOTALL)
-            if not laws:
-                break
-                
-            # 해당 지자체명이 포함되거나 기관명에 포함된 경우만 1차 수집
-            for law_xml in laws:
-                name = extract_tag("자치법규명", law_xml)
-                org = extract_tag("지자체명", law_xml) or extract_tag("제개정기관명", law_xml)
-                
-                if city_nospace in name.replace(" ", "") or city_nospace in org.replace(" ", ""):
-                    current_laws.append(law_xml)
-                    
-            if page * 100 >= total_cnt or len(laws) < 100:
-                break
-            page += 1
-
-        if current_laws:
-            all_laws = current_laws
+        except Exception:
             break
 
+        if total_cnt is None:
+            m = re.search(r"(\d+)", resp.text, re.IGNORECASE)
+            total_cnt = int(m.group(1)) if m else 0
+
+        laws = re.findall(r"]*>.*?", resp.text, re.DOTALL)
+        
+        # 1차 검색 결과가 없는 경우 '지자체명 건축'으로 2차 검색 진행
+        if not laws:
+            if page == 1 and query_str != f"{city_name} 건축":
+                query_str = f"{city_name} 건축"
+                total_cnt = None
+                continue
+            break
+
+        all_laws.extend(laws)
+        if len(all_laws) >= total_cnt or len(laws) < 100:
+            break
+        page += 1
+
     results = []
-    seen_mst = set()
-    
     for law in all_laws:
         name = extract_tag("자치법규명", law)
         mst = extract_tag("자치법규일련번호", law)
-        org = extract_tag("지자체명", law) or extract_tag("제개정기관명", law)
-        
-        if name and mst and mst not in seen_mst:
-            name_ns = name.replace(" ", "")
-            org_ns = org.replace(" ", "")
-            
-            # 검색한 지자체 관련 조례이면서 건축 관련 조례인 경우 추출
-            if (city_nospace in name_ns or city_nospace in org_ns) and ("건축" in name_ns or "조례" in name_ns):
-                results.append((name, mst))
-                seen_mst.add(mst)
+        # 제목에 '건축'과 '조례'가 모두 포함되어 있는지 검증
+        if "건축" in name and "조례" in name:
+            results.append((name, mst))
 
-    # 지자체 건축 조례가 상단에 위치하도록 정렬
+    # 대상 지자체명의 건축조례와 가장 가까운 항목 우선 정렬
     def score(item):
         name_ns = item[0].replace(" ", "")
-        exact_target = city_nospace + "건축조례"
-        
-        if name_ns == exact_target:
+        target_exact = city_nospace + "건축조례"
+        if name_ns == target_exact:
             return 0
-        if city_nospace in name_ns and "건축조례" in name_ns:
+        if name_ns.startswith(city_nospace) and "건축조례" in name_ns:
             return 1
-        if city_nospace in name_ns and "건축" in name_ns:
-            return 2
-        return 3
+        return 2
 
     results.sort(key=score)
     return results
@@ -255,7 +241,7 @@ def get_main_landscape_article(articles):
 
 
 # ----------------------------------------------------------------------
-# 국토교통부 고시 「조경기준」
+# 국토교통부 고시 「조경기준」 (행정규칙, target=admrul)
 # ----------------------------------------------------------------------
 
 _ADMRUL_CACHE = {"body": None, "fetched": False, "error": None}
@@ -282,7 +268,7 @@ def fetch_admrul_body(rul_id: str) -> str:
 
 
 def extract_admrul_article(full_text: str, article_no: int):
-    blocks = re.findall(r"\s*\s*", full_text, re.DOTALL)
+    blocks = re.findall(r"\s*\s*", full_text, re.DOTALL | re.IGNORECASE)
     prefix = f"제{article_no}조"
     for b in blocks:
         if b.strip().startswith(prefix):
@@ -349,7 +335,7 @@ def extract_planting_pct_from_ordinance(ordinance_content: str):
 
 
 # ----------------------------------------------------------------------
-# 건축법 시행령
+# 건축법 시행령 (법령, target=law)
 # ----------------------------------------------------------------------
 
 _LAW_CACHE = {}
@@ -399,7 +385,7 @@ def extract_law_article(full_text: str, article_no: int):
         no_m = re.search(r"(.*?)", art)
         if no_m and no_m.group(1).strip() == str(article_no):
             title = extract_tag("조문제목", art)
-            hangs = re.findall(r"\s*\s*", art, re.DOTALL)
+            hangs = re.findall(r"\s*\s*", art, re.DOTALL | re.IGNORECASE)
             lines = []
             for h in hangs:
                 clean = re.sub(r"<[^>]+>", " ", h)
@@ -652,8 +638,8 @@ def search():
     if not city:
         return render_template("index.html", city="", results=None, total=None)
     try:
+        total = count_all_ordinances(city)
         results = search_building_ordinance(city)
-        total = len(results)
     except Exception as e:
         return render_template("index.html", city=city, results=[], total=None,
                                error=f"검색 중 오류: {e}")
@@ -783,6 +769,7 @@ def favorites_remove():
 
 
 def get_local_ip():
+    """이 컴퓨터의 LAN IP 주소를 자동으로 확인 (폰 접속 안내용)"""
     import socket
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -801,7 +788,7 @@ def open_browser():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     is_frozen = getattr(sys, "frozen", False)
-    
+
     if "PORT" not in os.environ:
         local_ip = get_local_ip()
         print("=" * 60)
