@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-대지안의 조경 기준 조회 프로그램 (Render 클라우드 배포용)
-- Render 파일 시스템 접근 권한 예외 처리 (PermissionError 방지)
-- 템플릿 렌더링 실패 및 API 파싱 failure 시 500 에러 완벽 차단
+대지안의 조경 기준 조회 프로그램 (Render 클라우드 배포용 - 검색 기능 완전 복구판)
 """
 
 import json
@@ -19,7 +17,6 @@ OC_KEY = "dsland"
 SEARCH_URL = "http://www.law.go.kr/DRF/lawSearch.do"
 SERVICE_URL = "http://www.law.go.kr/DRF/lawService.do"
 
-# 클라우드 호스팅 환경을 고려한 임시 폴더 설정 (권한 에러 방지)
 DATA_DIR = "/tmp/.landscape_app" if os.path.exists("/tmp") else os.path.join(os.path.expanduser("~"), ".landscape_app")
 try:
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -29,7 +26,6 @@ FAVORITES_FILE = os.path.join(DATA_DIR, "favorites.json")
 
 
 def resource_path(relative_path: str) -> str:
-    """개발 환경 및 PyInstaller exe / 배포 환경 공통 경로"""
     base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, relative_path)
 
@@ -40,10 +36,6 @@ app = Flask(
     static_folder=resource_path("static"),
 )
 
-
-# ----------------------------------------------------------------------
-# 즐겨찾기 유틸리티 (클라우드 파일 권한 안전장치)
-# ----------------------------------------------------------------------
 
 MEMORY_FAVORITES = []
 
@@ -67,10 +59,6 @@ def save_favorites(favs):
     except Exception:
         pass
 
-
-# ----------------------------------------------------------------------
-# 안전 유틸리티 및 변환 함수
-# ----------------------------------------------------------------------
 
 def clean_cdata(text: str) -> str:
     if not text:
@@ -149,71 +137,77 @@ def extract_tag(tag: str, block: str) -> str:
 
 
 # ----------------------------------------------------------------------
-# 자치법규(조례) API 및 안전 파서
+# 복구 및 개선된 자치법규(조례) API 검색 함수
 # ----------------------------------------------------------------------
 
 def count_all_ordinances(city_name: str) -> int:
     try:
-        params = {"OC": OC_KEY, "target": "ordin", "type": "XML", "query": city_name, "display": 1}
+        # 지자체명만 검색하여 전체 조례 수 측정
+        params = {"OC": OC_KEY, "target": "ordin", "type": "XML", "query": city_name.strip(), "display": 1}
         resp = requests.get(SEARCH_URL, params=params, timeout=10)
         resp.encoding = "utf-8"
-        m = re.search(r"(\d+)", resp.text)
+        m = re.search(r"(\d+)", resp.text, re.IGNORECASE)
         return int(m.group(1)) if m else 0
     except Exception:
         return 0
 
 
 def search_building_ordinance(city_name: str):
-    keyword = "건축 조례"
-    city_nospace = city_name.replace(" ", "")
-    keyword_nospace = keyword.replace(" ", "")
+    city_clean = city_name.strip()
+    city_nospace = city_clean.replace(" ", "")
 
     all_laws = []
-    page = 1
-    total_cnt = None
     
-    try:
-        while True:
+    # 1차 시도: "지자체명 건축조례"
+    queries = [f"{city_clean} 건축조례", f"{city_clean} 건축 조례", city_clean]
+    
+    for query_str in queries:
+        try:
             params = {
-                "OC": OC_KEY, "target": "ordin", "type": "XML",
-                "query": f"{city_name} {keyword}", "display": 100, "page": page,
+                "OC": OC_KEY,
+                "target": "ordin",
+                "type": "XML",
+                "query": query_str,
+                "display": 100,
+                "page": 1,
             }
             resp = requests.get(SEARCH_URL, params=params, timeout=10)
             resp.encoding = "utf-8"
-            if total_cnt is None:
-                m = re.search(r"(\d+)", resp.text)
-                total_cnt = int(m.group(1)) if m else 0
             
-            laws = re.findall(r"]*>.*?", resp.text, re.DOTALL)
-            if not laws:
+            laws = re.findall(r"]*>.*?", resp.text, re.DOTALL | re.IGNORECASE)
+            if laws:
+                all_laws = laws
                 break
-            all_laws.extend(laws)
-            if len(all_laws) >= total_cnt or len(laws) < 100 or page >= 5:
-                break
-            page += 1
-    except Exception:
-        pass
+        except Exception:
+            continue
 
     results = []
+    seen_mst = set()
+
     for law in all_laws:
         try:
             name = extract_tag("자치법규명", law)
             mst = extract_tag("자치법규일련번호", law)
-            if name and mst:
-                results.append((name, mst))
+            
+            # 건축조례 관련 항목 필터링
+            if name and mst and mst not in seen_mst:
+                if "건축" in name and "조례" in name:
+                    results.append((name, mst))
+                    seen_mst.add(mst)
         except Exception:
             continue
 
+    # 정렬 순서: 지자체명 + 건축조례 와 정확히 일치하는 항목을 최상단으로
     def score(item):
         try:
             name_clean = clean_cdata(item[0])
             name_ns = name_clean.replace(" ", "")
             
-            if name_ns == city_nospace + keyword_nospace:
-                return 0
             if name_ns == city_nospace + "건축조례":
+                return 0
+            if name_ns.startswith(city_nospace) and "건축조례" in name_ns:
                 return 1
-            if name_ns.startswith(city_nospace) and keyword_nospace in name_ns:
+            if "건축조례" in name_ns:
                 return 2
             return 3
         except Exception:
@@ -223,6 +217,7 @@ def search_building_ordinance(city_name: str):
         results.sort(key=score)
     except Exception:
         pass
+        
     return results
 
 
@@ -309,10 +304,6 @@ def get_main_landscape_article(articles):
             return content
     return articles[0][1] if articles else ""
 
-
-# ----------------------------------------------------------------------
-# 국토부 고시 데이터 안전 조회
-# ----------------------------------------------------------------------
 
 _CACHE = {"admrul": None}
 
@@ -413,10 +404,6 @@ def extract_piloti_cap_from_ordinance(ordinance_content: str):
     return None, True
 
 
-# ----------------------------------------------------------------------
-# 계산 엔진
-# ----------------------------------------------------------------------
-
 def compute_defaults(main_content: str, city: str):
     main_no = extract_article_no_from_content(main_content)
 
@@ -485,7 +472,7 @@ def run_calculation(main_content, city, site_area, tier_pct, exempt_mult,
                      "value": f"{fmt1(planting_min)}㎡"})
 
         natural_frac = pct_to_korean_fraction(natural_pct)
-        rows.append({"label": f"③ 자연지반 최소 면적 (①×{natural_frac}, 근거: {natural_source})",
+        rows.append({"label": f"③ 자연지반 최소 면적 (①×{natural_source}, 근거: {natural_source})",
                      "value": f"{fmt1(natural_min)}㎡"})
 
         roof_frac = pct_to_korean_fraction(roof_cap_pct * 100)
@@ -502,7 +489,7 @@ def run_calculation(main_content, city, site_area, tier_pct, exempt_mult,
 
 
 # ----------------------------------------------------------------------
-# Flask 웹 라우트 (최상위 예외 처리 보장)
+# Flask 웹 라우트
 # ----------------------------------------------------------------------
 
 @app.route("/")
@@ -523,7 +510,6 @@ def search():
         results = search_building_ordinance(city)
         return render_template("index.html", city=city, results=results, total=total, favorites=favs)
     except Exception as e:
-        # 에러 발생 시에도 500으로 튕기지 않고 화면 유지
         return render_template("index.html", city=city, results=[], total=0, error=f"조회 중 에러가 발생했습니다: {e}", favorites=favs)
 
 
