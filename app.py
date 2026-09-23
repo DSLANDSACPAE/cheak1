@@ -92,17 +92,19 @@ def extract_tag(tag, block):
     m = re.search(rf"<{tag}[^>]*>(.*?)", block, re.DOTALL)
     if not m:
         return ""
-    inner = m.group(1)
+    inner = m.group(1).strip()
     
-    # CDATA 태그가 있을 경우 추출
+    # CDATA 태그 내부 내용 추출
     cdata = re.search(r"", inner, re.IGNORECASE | re.DOTALL)
     if cdata:
         raw = cdata.group(1)
     else:
-        # 혹시 cdata 태그가 닫히지 않았거나 일부 문자열 형태로 남아있을 때 깔끔히 제거
+        # 혹시 남아있을 수 있는 CDATA 및 잔여 특수문자제거
         raw = re.sub(r"", "", inner, flags=re.IGNORECASE)
-        
-    return raw.strip()
+
+    # 문자열 앞뒤의 '>', '<' 문자 제거
+    raw = raw.strip().strip(">").strip("<").strip()
+    return raw
 
 
 # ----------------------------------------------------------------------
@@ -147,17 +149,27 @@ def search_building_ordinance(city_name: str):
     for law in all_laws:
         name = extract_tag("자치법규명", law)
         mst = extract_tag("자치법규일련번호", law)
-        results.append((name, mst))
+        if name and mst:
+            results.append((name, mst))
 
     def score(item):
         name_ns = item[0].replace(" ", "")
-        if name_ns == city_nospace + keyword_nospace:
+        exact_target = city_nospace + keyword_nospace  # 예: "안산시건축조례"
+        
+        # 1. 완벽히 일치하는 경우 (최우선)
+        if name_ns == exact_target:
             return 0
+        # 2. 지자체명으로 시작하고 건축조례로 끝나는 경우 (예: "안산시 건축 조례")
         if name_ns.startswith(city_nospace) and name_ns.endswith(keyword_nospace):
             middle = name_ns[len(city_nospace):-len(keyword_nospace)]
             if middle == "":
-                return 1
-        return 2
+                return 0
+            return 1
+        # 3. 건축 조례라는 키워드가 포함된 경우
+        if keyword_nospace in name_ns:
+            return 2
+        # 4. 기타 관련 조례
+        return 3
 
     results.sort(key=score)
     return results
