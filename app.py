@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 # 대지안의 조경 기준 조회 프로그램 (모바일 웹앱 버전 / exe 실행파일 겸용 / 클라우드 배포 겸용)
-# - 데스크톱 app.py와 동일한 로직(API 호출, 정규식 추출)을 그대로 재사용
-# - CDATA 태그 완벽 제거 및 국가법령정보센터 자치법규 API 연동 보완 완료
 
 import json
 import math
@@ -25,8 +23,6 @@ FAVORITES_FILE = os.path.join(DATA_DIR, "favorites.json")
 
 
 def resource_path(relative_path: str) -> str:
-    # 개발 중(python app.py)과 PyInstaller로 exe 빌드된 이후 모두에서
-    # templates/static 폴더를 정확히 찾기 위한 경로 처리.
     base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, relative_path)
 
@@ -43,7 +39,6 @@ app = Flask(
 # ----------------------------------------------------------------------
 
 def safe_api_get(url: str, params: dict) -> str:
-    # 안전한 API 호출 및 인코딩 처리
     try:
         resp = requests.get(url, params=params, timeout=15)
         resp.encoding = "utf-8"
@@ -54,20 +49,15 @@ def safe_api_get(url: str, params: dict) -> str:
 
 
 def clean_cdata_and_tags(text: str) -> str:
-    # XML CDATA 태그 및 HTML/XML 태그 완벽 제거 유틸리티
     if not text:
         return ""
-    # CDATA 태그 내부 문자열만 추출
     text = re.sub(r"", r"\1", text, flags=re.DOTALL | re.IGNORECASE)
-    # 잔여 HTML/XML 태그 제거
     text = re.sub(r"<[^>]+>", "", text)
-    # HTML 엔티티 변환
-    text = text.replace("<", "<").replace(">", ">").replace("&", "&").replace(""", '"')
+    text = text.replace("<", "<").replace(">", ">").replace("&", "&").replace(""", '\"')
     return text.strip()
 
 
 def extract_tag(tag: str, block: str) -> str:
-    # XML 블록에서 특정 태그의 텍스트를 정교하게 추출 (CDATA 완벽 처리)
     m = re.search(rf"<{tag}[^>]*>(.*?)", block, re.DOTALL | re.IGNORECASE)
     if not m:
         return ""
@@ -124,7 +114,6 @@ def parse_ratio_input(text: str):
 # ----------------------------------------------------------------------
 
 def count_all_ordinances(city_name: str) -> int:
-    # 해당 지자체의 전체 자치법규 수 조회
     params = {"OC": OC_KEY, "target": "ordin", "type": "XML", "query": city_name, "display": 1}
     xml_text = safe_api_get(SEARCH_URL, params)
     
@@ -139,7 +128,6 @@ def count_all_ordinances(city_name: str) -> int:
 
 
 def search_building_ordinance(city_name: str):
-    # 건축조례 검색 (원작 알고리즘 100% 보존 + XML 파싱 보완)
     keyword = "건축 조례"
     city_nospace = city_name.replace(" ", "")
     keyword_nospace = keyword.replace(" ", "")
@@ -261,7 +249,7 @@ def get_main_landscape_article(articles):
 
 
 # ----------------------------------------------------------------------
-# 국토교통부 고시 「조경기준」 (행정규칙, target=admrul)
+# 국토교통부 고시 「조경기준」
 # ----------------------------------------------------------------------
 
 _ADMRUL_CACHE = {"body": None, "fetched": False, "error": None}
@@ -353,7 +341,7 @@ def extract_planting_pct_from_ordinance(ordinance_content: str):
 
 
 # ----------------------------------------------------------------------
-# 건축법 시행령 (법령, target=law)
+# 건축법 시행령
 # ----------------------------------------------------------------------
 
 _LAW_CACHE = {}
