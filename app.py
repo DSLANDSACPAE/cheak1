@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-대지안의 조경 기준 조회 프로그램 (모바일 웹앱 버전 / exe 실행파일 겸용 / 클라우드 배포 겸용)
-- 데스크톱 app.py와 동일한 로직(API 호출, 정규식 추출)을 그대로 재사용
-- 실행: python app.py  (또는 빌드된 .exe 더블클릭)
-- 접속: 컴퓨터와 같은 와이파이에 연결된 폰 브라우저에서 http://:5000
+대지안의 조경 기준 조회 프로그램 (모바일 웹앱 버전 / exe 실행파일 겸용 / GitServer 배포 겸용)
+- 국가법령정보센터 DRF API 자치법규 검색 및 XML 파싱 완벽 견고화 버전
 필요 라이브러리: pip install flask requests gunicorn
 """
 
@@ -87,7 +85,7 @@ def parse_ratio_input(text: str):
 
 
 def extract_tag(tag, block):
-    m = re.search(rf"<{tag}[^>]*>(.*?)", block, re.DOTALL)
+    m = re.search(rf"<{tag}[^>]*>(.*?)", block, re.DOTALL | re.IGNORECASE)
     if not m:
         return ""
     inner = m.group(1)
@@ -96,85 +94,110 @@ def extract_tag(tag, block):
     return raw.strip()
 
 
+def safe_api_get(url, params):
+    """캐시 방지 헤더를 추가한 안전한 HTTP GET 요청 유틸리티"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+    }
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=12)
+        resp.encoding = "utf-8"
+        return resp.text
+    except Exception as e:
+        print(f"[API Error] {url} - {e}")
+        return ""
+
+
 # ----------------------------------------------------------------------
-# 자치법규(조례) API (검색 로직 및 XML 파싱 보완)
+# 자치법규(조례) API (다중 검색 및 파싱 완벽 견고화)
 # ----------------------------------------------------------------------
 
 def count_all_ordinances(city_name: str) -> int:
     """해당 지자체의 전체 자치법규 수 조회"""
-    params = {"OC": OC_KEY, "target": "ordin", "type": "XML", "query": city_name, "display": 1}
-    try:
-        resp = requests.get(SEARCH_URL, params=params, timeout=15)
-        resp.encoding = "utf-8"
-        # totalcnt 태그를 정확히 매칭하도록 수정
-        m = re.search(r"(\d+)", resp.text, re.IGNORECASE)
-        return int(m.group(1)) if m else -1
-    except Exception:
+    xml_text = safe_api_get(SEARCH_URL, {"OC": OC_KEY, "target": "ordin", "type": "XML", "query": city_name, "display": 1})
+    if not xml_text:
         return -1
+
+    #  또는  검색
+    m = re.search(r"<(?:totalcnt|totalCnt)>(.*?)", xml_text, re.IGNORECASE)
+    if m and m.group(1).strip().isdigit():
+        return int(m.group(1).strip())
+
+    # 태그를 찾을 수 없는 경우 법령 항목 직접 수 세기
+    laws = re.findall(r"<(?:law|ordin)\b[^>]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
+    return len(laws)
 
 
 def search_building_ordinance(city_name: str):
     """
-    지자체 건축조례 검색
+    지자체 건축조례 검색 (다단계 키워드 폴백 적용)
     """
-    city_nospace = city_name.replace(" ", "")
-    query_str = f"{city_name} 건축조례"
+    city_clean = city_name.strip()
+    city_nospace = city_clean.replace(" ", "")
 
-    all_laws = []
-    page = 1
-    total_cnt = None
+    # 검색 후보 키워드 생성 (예: '울산광역시 건축조례', '울산광역시 건축', '울산 건축')
+    search_queries = [f"{city_clean} 건축조례", f"{city_clean} 건축"]
+    if "광역시" in city_clean:
+        short_city = city_clean.replace("광역시", "").strip()
+        search_queries.append(f"{short_city} 건축")
+    elif "특별자치시" in city_clean:
+        short_city = city_clean.replace("특별자치시", "").strip()
+        search_queries.append(f"{short_city} 건축")
 
-    while True:
-        params = {
-            "OC": OC_KEY,
-            "target": "ordin",
-            "type": "XML",
-            "query": query_str,
-            "display": 100,
-            "page": page,
-        }
-        try:
-            resp = requests.get(SEARCH_URL, params=params, timeout=15)
-            resp.encoding = "utf-8"
-        except Exception:
+    all_found_laws = []
+    seen_mst = set()
+
+    for query_str in search_queries:
+        page = 1
+        while page <= 3:
+            params = {
+                "OC": OC_KEY,
+                "target": "ordin",
+                "type": "XML",
+                "query": query_str,
+                "display": 100,
+                "page": page,
+            }
+            xml_text = safe_api_get(SEARCH_URL, params)
+            if not xml_text:
+                break
+
+            # law 또는 ordin 태그 모두 대응
+            laws = re.findall(r"<(?:law|ordin)\b[^>]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
+            if not laws:
+                break
+
+            for law in laws:
+                name = extract_tag("자치법규명", law) or extract_tag("조례명", law)
+                mst = extract_tag("자치법규일련번호", law) or extract_tag("자치법규ID", law) or extract_tag("MST", law)
+
+                if mst and mst not in seen_mst:
+                    seen_mst.add(mst)
+                    all_found_laws.append((name, mst, law))
+
+            if len(laws) < 100:
+                break
+            page += 1
+
+        # 검색 결과로 '건축' 관련 조례가 발견되었다면 다음 폴백 검색어 스킵
+        if any("건축" in name for name, _, _ in all_found_laws):
             break
 
-        if total_cnt is None:
-            # totalcnt 태그를 정확히 매칭하도록 수정
-            m = re.search(r"(\d+)", resp.text, re.IGNORECASE)
-            total_cnt = int(m.group(1)) if m else 0
-
-        # law 태그 추출 정규식 원복 및 수정
-        laws = re.findall(r"]*>.*?", resp.text, re.DOTALL)
-        
-        # 1차 검색 결과가 없는 경우 '지자체명 건축'으로 2차 검색 진행
-        if not laws:
-            if page == 1 and query_str != f"{city_name} 건축":
-                query_str = f"{city_name} 건축"
-                total_cnt = None
-                continue
-            break
-
-        all_laws.extend(laws)
-        if len(all_laws) >= total_cnt or len(laws) < 100:
-            break
-        page += 1
-
+    # 필터링: 조례명에 '건축'이 들어가는 항목만 추출
     results = []
-    for law in all_laws:
-        name = extract_tag("자치법규명", law)
-        mst = extract_tag("자치법규일련번호", law)
-        # 제목에 '건축'과 '조례'가 모두 포함되어 있는지 검증
-        if "건축" in name and "조례" in name:
+    for name, mst, _ in all_found_laws:
+        if "건축" in name:
             results.append((name, mst))
 
-    # 대상 지자체명의 건축조례와 가장 가까운 항목 우선 정렬
+    # 지자체명과 완벽히 매칭되는 건축조례 우선 정렬
     def score(item):
         name_ns = item[0].replace(" ", "")
         target_exact = city_nospace + "건축조례"
         if name_ns == target_exact:
             return 0
-        if name_ns.startswith(city_nospace) and "건축조례" in name_ns:
+        if city_nospace in name_ns and "건축" in name_ns and "조례" in name_ns:
             return 1
         return 2
 
@@ -184,9 +207,7 @@ def search_building_ordinance(city_name: str):
 
 def fetch_ordinance_body(mst: str) -> str:
     params = {"OC": OC_KEY, "target": "ordin", "MST": mst, "type": "XML"}
-    resp = requests.get(SERVICE_URL, params=params, timeout=15)
-    resp.encoding = "utf-8"
-    return resp.text
+    return safe_api_get(SERVICE_URL, params)
 
 
 def extract_landscape_articles(full_text: str):
@@ -251,9 +272,8 @@ _ADMRUL_CACHE = {"body": None, "fetched": False, "error": None}
 
 def search_admrul_exact(keyword: str):
     params = {"OC": OC_KEY, "target": "admrul", "type": "XML", "query": keyword, "display": 20}
-    resp = requests.get(SEARCH_URL, params=params, timeout=15)
-    resp.encoding = "utf-8"
-    laws = re.findall(r"]*>.*?", resp.text, re.DOTALL)
+    xml_text = safe_api_get(SEARCH_URL, params)
+    laws = re.findall(r"]*>.*?", xml_text, re.DOTALL)
     for law in laws:
         name = extract_tag("행정규칙명", law)
         rul_id = extract_tag("행정규칙일련번호", law)
@@ -264,9 +284,7 @@ def search_admrul_exact(keyword: str):
 
 def fetch_admrul_body(rul_id: str) -> str:
     params = {"OC": OC_KEY, "target": "admrul", "ID": rul_id, "type": "XML"}
-    resp = requests.get(SERVICE_URL, params=params, timeout=15)
-    resp.encoding = "utf-8"
-    return resp.text
+    return safe_api_get(SERVICE_URL, params)
 
 
 def extract_admrul_article(full_text: str, article_no: int):
@@ -345,9 +363,8 @@ _LAW_CACHE = {}
 
 def search_law_exact(keyword: str):
     params = {"OC": OC_KEY, "target": "law", "type": "XML", "query": keyword, "display": 20}
-    resp = requests.get(SEARCH_URL, params=params, timeout=15)
-    resp.encoding = "utf-8"
-    laws = re.findall(r"]*>.*?", resp.text, re.DOTALL)
+    xml_text = safe_api_get(SEARCH_URL, params)
+    laws = re.findall(r"]*>.*?", xml_text, re.DOTALL)
     for law in laws:
         name = extract_tag("법령명한글", law)
         mst = extract_tag("법령일련번호", law)
@@ -358,9 +375,7 @@ def search_law_exact(keyword: str):
 
 def fetch_law_body(mst: str) -> str:
     params = {"OC": OC_KEY, "target": "law", "MST": mst, "type": "XML"}
-    resp = requests.get(SERVICE_URL, params=params, timeout=15)
-    resp.encoding = "utf-8"
-    return resp.text
+    return safe_api_get(SERVICE_URL, params)
 
 
 def get_law_body(law_name: str):
@@ -640,8 +655,9 @@ def search():
     if not city:
         return render_template("index.html", city="", results=None, total=None)
     try:
-        total = count_all_ordinances(city)
         results = search_building_ordinance(city)
+        total_count = count_all_ordinances(city)
+        total = max(total_count, len(results))
     except Exception as e:
         return render_template("index.html", city=city, results=[], total=None,
                                error=f"검색 중 오류: {e}")
