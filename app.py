@@ -9,6 +9,7 @@ import re
 import sys
 import threading
 import webbrowser
+import xml.etree.ElementTree as ET
 from fractions import Fraction
 
 import requests
@@ -36,17 +37,38 @@ app = Flask(
 
 
 # ----------------------------------------------------------------------
-# 공통 유틸 및 XML 파싱 보완
+# 공통 유틸 및 강력한 XML 파싱 (정규식 제거)
 # ----------------------------------------------------------------------
 
 def safe_api_get(url: str, params: dict) -> str:
+    """봇 차단을 피하기 위해 브라우저 헤더를 추가하여 API를 호출합니다."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/xml, text/xml, */*; q=0.01"
+    }
     try:
-        resp = requests.get(url, params=params, timeout=15)
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
         resp.encoding = "utf-8"
-        return resp.text
+        if resp.status_code == 200:
+            return resp.text
+        else:
+            print(f"API 응답 에러: HTTP {resp.status_code}")
+            return ""
     except Exception as e:
         print(f"API 호출 오류: {e}")
         return ""
+
+
+def safe_parse_xml(xml_text: str):
+    """XML 텍스트를 파싱하여 ElementTree 객체로 반환합니다."""
+    if not xml_text:
+        return None
+    try:
+        # 시작 부분의 공백 등이 파싱을 방해하지 않도록 strip 처리
+        return ET.fromstring(xml_text.strip())
+    except ET.ParseError as e:
+        print(f"XML 파싱 에러: {e}")
+        return None
 
 
 def clean_cdata_and_tags(text: str) -> str:
@@ -111,78 +133,80 @@ def parse_ratio_input(text: str):
 
 
 # ----------------------------------------------------------------------
-# 자치법규(조례) API - 검색 로직 수정
+# 자치법규(조례) API - 완전히 새롭게 개선된 검색 로직 (ElementTree 사용)
 # ----------------------------------------------------------------------
 
 def count_all_ordinances(city_name: str) -> int:
     params = {"OC": OC_KEY, "target": "ordin", "type": "XML", "query": city_name, "display": 1}
     xml_text = safe_api_get(SEARCH_URL, params)
+    root = safe_parse_xml(xml_text)
     
-    m = re.search(r"<(?:totalcnt|totalCount)>(.*?)", xml_text, re.IGNORECASE)
-    if m:
-        val = clean_cdata_and_tags(m.group(1))
-        if val.isdigit():
-            return int(val)
+    if root is not None:
+        for tag in ['totalCnt', 'totalCount', 'totalcnt']:
+            node = root.find(tag)
+            if node is not None and node.text and node.text.strip().isdigit():
+                return int(node.text.strip())
     return 0
 
 
 def search_building_ordinance(city_name: str):
-    # 지자체명 단일 검색어로 우선 1차 검색 후, '건축 조례' 및 '건축조례' 포함 항목 필터링
     city_clean = city_name.strip()
     all_laws = []
     
-    # 1. 지자체명 + 건축조례 붙여서 검색해보고, 없으면 지자체명으로만 검색
+    # 지자체명과 건축조례를 조합하여 검색
     queries_to_try = [f"{city_clean} 건축조례", f"{city_clean} 건축 조례", city_clean]
     
     for q in queries_to_try:
         page = 1
-        while page <= 3:  # 상위 페이지 검색
+        found_in_query = False
+        while page <= 3:  # 최대 3페이지까지만 확인
             params = {
                 "OC": OC_KEY, "target": "ordin", "type": "XML",
                 "query": q, "display": 100, "page": page,
             }
             xml_text = safe_api_get(SEARCH_URL, params)
-            if not xml_text:
+            root = safe_parse_xml(xml_text)
+            
+            if root is None:
                 break
 
-            laws = re.findall(r"<(?:law|ordin|item)\b[^>]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
-            if not laws:
-                #  태그 대신  안의 데이터 구조 대응
-                laws = re.findall(r"]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
+            # 태그 구조 호환성 대응 ('ordin' 또는 'law')
+            items = root.findall('.//ordin')
+            if not items:
+                items = root.findall('.//law')
             
-            if laws:
-                all_laws.extend(laws)
-                break  # 해당 쿼리로 결과가 발견되면 다음 쿼리 시도 안 함
+            if items:
+                for item in items:
+                    name_node = item.find('ordinNm') if item.find('ordinNm') is not None else item.find('lawNm')
+                    if name_node is None: name_node = item.find('자치법규명')
+                    
+                    seq_node = item.find('ordinSeq') if item.find('ordinSeq') is not None else item.find('MST')
+                    if seq_node is None: seq_node = item.find('자치법규일련번호')
+                    
+                    if name_node is not None and seq_node is not None and name_node.text and seq_node.text:
+                        all_laws.append((name_node.text.strip(), seq_node.text.strip()))
+                found_in_query = True
+            else:
+                break  # 이 페이지에 데이터가 없으면 다음 루프 탈출
             page += 1
-        if all_laws:
-            break
+            
+        if found_in_query:
+            break  # 상세 검색어에서 결과를 찾았으면 더 넓은 범위의 검색어는 시도 안 함
 
     results = []
     seen_mst = set()
     city_nospace = city_clean.replace(" ", "")
 
-    for law in all_laws:
-        name = (extract_tag("자치법규명", law) or 
-                extract_tag("조례명", law) or 
-                extract_tag("lawNm", law) or 
-                extract_tag("ordinNm", law))
-        mst = (extract_tag("자치법규일련번호", law) or 
-               extract_tag("자치법규ID", law) or 
-               extract_tag("MST", law) or 
-               extract_tag("ordinSeq", law))
-        
-        if not name or not mst:
-            continue
-            
+    for name, mst in all_laws:
         name_nospace = name.replace(" ", "")
         
-        # '건축조례' 또는 '건축 조례'가 포함되고 지자체명이 맞는 조례 추출
+        # 필터링: '건축'과 '조례'가 모두 포함된 항목만 추가
         if "건축" in name_nospace and "조례" in name_nospace:
             if mst not in seen_mst:
                 seen_mst.add(mst)
                 results.append((name, mst))
 
-    # 검색 우선순위 정렬 (예: "울산광역시 건축 조례" 완벽 일치 항목을 최상단으로)
+    # 검색 우선순위 정렬
     def score(item):
         name_ns = item[0].replace(" ", "")
         target_exact = city_nospace + "건축조례"
@@ -190,7 +214,9 @@ def search_building_ordinance(city_name: str):
             return 0
         if name_ns.startswith(city_nospace) and "건축조례" in name_ns:
             return 1
-        return 2
+        if "건축조례" in name_ns:
+            return 2
+        return 3
 
     results.sort(key=score)
     return results
@@ -268,12 +294,14 @@ _ADMRUL_CACHE = {"body": None, "fetched": False, "error": None}
 def search_admrul_exact(keyword: str):
     params = {"OC": OC_KEY, "target": "admrul", "type": "XML", "query": keyword, "display": 20}
     xml_text = safe_api_get(SEARCH_URL, params)
-    laws = re.findall(r"]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
-    for law in laws:
-        name = extract_tag("행정규칙명", law)
-        rul_id = extract_tag("행정규칙일련번호", law)
-        if name.strip() == keyword:
-            return name, rul_id
+    root = safe_parse_xml(xml_text)
+    if root is not None:
+        for item in root.findall('.//admrul'):
+            name_node = item.find('행정규칙명')
+            id_node = item.find('행정규칙일련번호')
+            if name_node is not None and id_node is not None and name_node.text:
+                if name_node.text.strip() == keyword:
+                    return name_node.text.strip(), id_node.text.strip()
     return None, None
 
 
@@ -360,12 +388,14 @@ _LAW_CACHE = {}
 def search_law_exact(keyword: str):
     params = {"OC": OC_KEY, "target": "law", "type": "XML", "query": keyword, "display": 20}
     xml_text = safe_api_get(SEARCH_URL, params)
-    laws = re.findall(r"]*>.*?", xml_text, re.DOTALL | re.IGNORECASE)
-    for law in laws:
-        name = extract_tag("법령명한글", law)
-        mst = extract_tag("법령일련번호", law)
-        if name.strip() == keyword:
-            return name, mst
+    root = safe_parse_xml(xml_text)
+    if root is not None:
+        for item in root.findall('.//law'):
+            name_node = item.find('법령명한글')
+            mst_node = item.find('법령일련번호')
+            if name_node is not None and mst_node is not None and name_node.text:
+                if name_node.text.strip() == keyword:
+                    return name_node.text.strip(), mst_node.text.strip()
     return None, None
 
 
